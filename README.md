@@ -1,3 +1,70 @@
+## September 2026 update: admin OTP, addresses, photos and emails
+
+Admin login requires an allowlisted email, the shared admin secret, then an email OTP.
+The allowlist is in `app/admin_setup.py`; it includes rajpurkaraakash@gmail.com and
+tanotiofficial@gmail.com. Set `ADMIN_SECRET_KEY` and a strong `SECRET_KEY` in the backend
+`.env`. Existing `ADMIN_API_KEY` is used as the login secret only if `ADMIN_SECRET_KEY`
+is unset. The old X-Admin-Key API authentication no longer works. Admin sessions expire
+after eight hours and are stored only for the browser tab session. Removing an email
+from the configured allowlist also invalidates its sessions after the backend restarts.
+
+Configure `RESEND_API_KEY` and a verified `EMAIL_FROM`. For isolated local testing only,
+`TESTING_MODE=true` makes both customer and admin OTP delivery console-only, even
+when a Resend key is configured. It also logs status notifications locally instead of
+sending them. Set this one flag in backend `.env`, then restart the backend. Both login
+screens identify console delivery automatically. Debug mode no longer controls OTP logging;
+`ADMIN_LOCAL_EMAIL` is replaced by `TESTING_MODE`. Use `TESTING_MODE=false` in production.
+This flag does not bypass OTP verification, admin secrets/allowlists, or customer order
+ownership; Shopify always uses the real store.
+Admin OTPs are separate from customer OTPs, use cryptographic randomness, expire after
+10 minutes, allow five guesses, and have a 30-second send/resend cooldown.
+
+With the backend virtual environment active, run from `backend/` before starting the app:
+
+```sh
+python -m flask --app run db upgrade
+```
+
+The new migration adds columns and tables without resetting existing data. Existing
+orders are resynced on the next customer login if shipping addresses are missing; existing requests
+without address snapshots fall back to the synced order address. Customer pickup edits
+are saved only on the request. Replacement shipments still use the original shipping address.
+
+Both request forms require one `photo_front` and one `photo_back` file, plus a JSON-encoded
+`pickup_address` in multipart form data. Each image is limited to 10 MB and 25 megapixels,
+then compressed locally. Both request types participate in 120-day retention and storage
+quota cleanup. Quota cleanup preserves active requests; if there is no room after cleaning
+completed/rejected requests, new uploads fail clearly instead of discarding active evidence.
+
+Milestone emails cover submission, approval/pickup booking, parcel receipt, rejection with
+reason, gift card issuance with code, manual refund approval, and replacement booking or
+manual arrangement. No additional confirmation buttons or WhatsApp calls were added.
+Manual refund emails say approved, not paid; shipment booking emails do not claim dispatch.
+Live Delhivery booking and live Shopify gift cards still require account-level verification;
+the existing shipping integration is not certified by these local tests.
+
+Emails are queued in the same database transaction as the request/status change and sent
+after commit. Failed sends remain queued. Configure a single scheduled worker on your VPS
+(e.g. every minute) to run the first command below, and photo cleanup daily:
+
+```sh
+python -m flask --app run retry-emails
+python -m flask --app run cleanup-photos
+```
+
+Resend retries use a stable Idempotency-Key. Resend retains these keys for 24 hours;
+a send accepted by Resend followed by a local crash could duplicate if retried after that
+window. See https://resend.com/docs/dashboard/emails/idempotency-keys.
+These commands are provided but no VPS scheduler has been installed by this change.
+
+Verification (isolated SQLite database and mocked external providers):
+
+```sh
+python -m unittest discover -s tests -v
+```
+
+---
+
 # Tanoti Returns App — Backend (Phase 1)
 
 Flask + Postgres backend for `returns.tanotiofficial.com`. This is Phase 1:
@@ -90,16 +157,9 @@ app/
 - **Returns/exchange analytics** — `GET /api/admin/analytics/overview`
   returns top-returned products, return reason breakdown, returns by
   size, and exchange reason breakdown.
-- **Local dev mode, no real credentials needed** — three independent
-  fallbacks, each triggered by leaving the relevant env var blank:
-  - `MOCK_SHOPIFY_MODE=true` → any email logs in; order data comes from
-    `scripts/seed.py` instead of a live Shopify store.
-  - No `RESEND_API_KEY` → OTP codes and emails print to the console.
-  - No `DO_SPACES_KEY` → return photos save to `./local_uploads/` and
-    are served at `/local-uploads/...`.
-
-  None of these fallbacks activate if the real credentials are set, so
-  the same code path runs in production once you fill in `.env`.
+- **Email testing:** `TESTING_MODE=true` prints OTPs and status emails locally.
+  Shopify always uses the configured real store, including gift card issuance.
+  Photos use local compressed storage.
 
 ## Still not built
 
@@ -198,11 +258,6 @@ curl -X POST http://localhost:5000/api/admin/requests/return/RET-000001/accept \
   -H "X-Admin-Key: dev-admin-key"
 ```
 
-You should see a `[LOCAL EMAIL]` status-update line print in the server
-console, the gift card get "issued" (`MOCK-GC-...` code in mock mode), and
-the request move to `completed` in `/api/admin/requests`.
-
-**7. When you're ready to test against real Shopify data**, set
-`MOCK_SHOPIFY_MODE=false`, fill in `SHOPIFY_ADMIN_API_TOKEN` and
-`SHOPIFY_STORE_DOMAIN` in `.env`, and use a real customer email that has
-orders on the store instead of `test@example.com`.
+`TESTING_MODE=true` logs emails locally. Shopify calls always use your real store;
+use a real customer email with orders. Gift card issuance and shipping remain live.
+See the current setup instructions at the top of this file for admin OTP login.

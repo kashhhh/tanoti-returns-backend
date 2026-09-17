@@ -1,0 +1,284 @@
+import io
+import json
+import tempfile
+import unittest
+from datetime import datetime, timedelta
+from pathlib import Path
+from unittest.mock import patch
+
+import jwt
+from PIL import Image
+from app import create_app
+from app.config import Config
+from app.extensions import db
+from app.models import (Customer, Order, OrderItem, PaymentMethod, AdminOTP,
+                        ReturnRequest, ExchangeRequest, Notification, RequestStatus)
+from app.utils.decorators import issue_token
+from app.services.notification_service import deliver_pending
+from app.services.storage_service import cleanup_old_photos
+
+ADDRESS = dict(name="Customer", phone="9876543210", address1="10 Original Road", address2="",
+               city="Mumbai", province="Maharashtra", zip="400001", country="India")
+
+
+def photo():
+    stream = io.BytesIO()
+    Image.new("RGB", (20, 20), "red").save(stream, "JPEG")
+    stream.seek(0)
+    return stream, "item.jpg"
+
+
+class WorkflowTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        class TestConfig(Config):
+            TESTING = True
+            TESTING_MODE = True
+            SECRET_KEY = "test-signing-key"
+            ADMIN_SECRET_KEY = "test-admin-secret"
+            ADMIN_EMAILS = ["staff@example.com"]
+            SQLALCHEMY_DATABASE_URI = "sqlite://"
+            RESEND_API_KEY = None
+        self.app = create_app(TestConfig)
+        self.app.config["PHOTOS_STORAGE_DIR"] = self.directory.name
+        self.ctx = self.app.app_context(); self.ctx.push()
+        db.create_all()
+        customer = Customer(email="customer@example.com", name="Customer")
+        order = Order(shopify_order_id="100", order_number="100", customer=customer,
+                      payment_method=PaymentMethod.PREPAID, shipping_address=ADDRESS,
+                      fulfilled_at=datetime.utcnow())
+        item = OrderItem(order=order, shopify_line_item_id="1", product_title="Shirt <b>red</b>", price=999, size="S")
+        db.session.add(item); db.session.commit()
+        self.item_id = item.id
+        self.customer_headers = {"Authorization": "Bearer " + issue_token(customer)}
+        admin = jwt.encode({"sub": "staff@example.com", "role": "admin", "aud": "tanoti-admin",
+                            "iat": datetime.utcnow(), "exp": datetime.utcnow()+timedelta(hours=1)},
+                           self.app.config["SECRET_KEY"], algorithm="HS256")
+        self.admin_headers = {"Authorization": "Bearer " + admin}
+        self.client = self.app.test_client()
+        self.network = patch("requests.post", side_effect=AssertionError("Unexpected live network call"))
+        self.network.start()
+
+    def tearDown(self):
+        self.network.stop()
+        db.session.remove(); db.drop_all(); self.ctx.pop(); self.directory.cleanup()
+
+    def submit(self, kind="return", **changes):
+        data = dict(reason="size_issue" if kind == "return" else "size_too_small", size="M",
+                    refund_mode="gift_card", photo_front=photo(), photo_back=photo(),
+                    pickup_address=json.dumps({**ADDRESS, "address1": "20 Pickup Road"}))
+        data.update(changes)
+        data = {k: v for k, v in data.items() if v is not None}
+        return self.client.post(f"/api/customer/order-items/{self.item_id}/{kind}",
+                                data=data, headers=self.customer_headers)
+
+    def action(self, number, action, kind="return", **data):
+        return self.client.post(f"/api/admin/requests/{kind}/{number}/{action}",
+                                json=data, headers=self.admin_headers)
+
+    def test_admin_requires_secret_and_allowlist(self):
+        with patch("app.auth.admin_routes.send_admin_otp_email") as send:
+            for email, secret in [("stranger@example.com", "test-admin-secret"), ("staff@example.com", "bad")]:
+                self.assertEqual(self.client.post("/api/admin/auth/request-otp", json=dict(email=email, secret=secret)).status_code, 401)
+            send.assert_not_called()
+        self.assertEqual(self.client.get("/api/admin/settings", headers={"X-Admin-Key": "test-admin-secret"}).status_code, 401)
+        self.assertEqual(self.client.get("/api/admin/settings", headers=self.customer_headers).status_code, 401)
+        self.assertEqual(self.client.get("/api/customer/orders", headers=self.admin_headers).status_code, 401)
+
+    def test_otp_cooldown_single_use_and_session(self):
+        payload = dict(email="STAFF@example.com", secret="test-admin-secret")
+        with patch("app.auth.admin_routes.send_admin_otp_email") as send:
+            self.assertEqual(self.client.post("/api/admin/auth/request-otp", json=payload).status_code, 200)
+            code = send.call_args.args[1]
+            self.assertEqual(self.client.post("/api/admin/auth/request-otp", json=payload).status_code, 429)
+            payload["otp"] = code
+            result = self.client.post("/api/admin/auth/verify-otp", json=payload)
+            self.assertEqual(result.status_code, 200)
+            self.assertEqual(self.client.get("/api/admin/settings", headers={"Authorization": "Bearer " + result.json["token"]}).status_code, 200)
+            self.assertEqual(self.client.post("/api/admin/auth/verify-otp", json=payload).status_code, 400)
+
+    def test_otp_expiry_attempts_and_resend(self):
+        payload = dict(email="staff@example.com", secret="test-admin-secret")
+        with patch("app.auth.admin_routes.send_admin_otp_email") as send:
+            self.client.post("/api/admin/auth/request-otp", json=payload)
+            old_code = send.call_args.args[1]
+            wrong = "000000" if old_code != "000000" else "111111"
+            for _ in range(5):
+                self.assertEqual(self.client.post("/api/admin/auth/verify-otp", json={**payload, "otp": wrong}).status_code, 400)
+            self.assertEqual(self.client.post("/api/admin/auth/verify-otp", json={**payload, "otp": old_code}).status_code, 429)
+            token = db.session.get(AdminOTP, payload["email"])
+            token.created_at -= timedelta(minutes=1); db.session.commit()
+            self.assertEqual(self.client.post("/api/admin/auth/resend-otp", json=payload).status_code, 200)
+            code = send.call_args.args[1]
+            token.expires_at = datetime.utcnow()-timedelta(seconds=1); db.session.commit()
+            self.assertEqual(self.client.post("/api/admin/auth/verify-otp", json={**payload, "otp": code}).status_code, 400)
+
+    def test_expired_or_removed_admin_cannot_access(self):
+        self.app.config["ADMIN_EMAILS"] = []
+        self.assertEqual(self.client.get("/api/admin/settings", headers=self.admin_headers).status_code, 401)
+
+    def test_return_address_snapshot_and_admin_photos(self):
+        result = self.submit()
+        self.assertEqual(result.status_code, 201, result.json)
+        req = ReturnRequest.query.one()
+        self.assertEqual(req.pickup_address["address1"], "20 Pickup Road")
+        self.assertEqual(req.order_item.order.shipping_address["address1"], "10 Original Road")
+        self.assertEqual(len(req.photo_urls), 2)
+        detail = self.client.get("/api/admin/requests", headers=self.admin_headers).json["requests"][0]
+        self.assertEqual(detail["pickup_address"], req.pickup_address)
+        self.assertEqual(len(detail["photo_urls"]), 2)
+        self.assertIn("&lt;b&gt;", Notification.query.one().html)
+
+    def test_exchange_photos_and_default_address(self):
+        result = self.submit("exchange", pickup_address=None)
+        self.assertEqual(result.status_code, 201, result.json)
+        req = ExchangeRequest.query.one()
+        self.assertEqual(req.pickup_address, ADDRESS)
+        self.assertEqual(len(req.photo_urls), 2)
+        self.assertEqual(len(self.client.get("/api/admin/requests", headers=self.admin_headers).json["requests"][0]["photo_urls"]), 2)
+
+    def test_missing_or_invalid_photo_rejected_for_both(self):
+        for kind in ("return", "exchange"):
+            self.assertEqual(self.submit(kind, photo_back=None).status_code, 400)
+            self.assertEqual(self.submit(kind, photo_back=(io.BytesIO(b"not an image"), "bad.jpg")).status_code, 400)
+            self.assertEqual(self.submit(kind, photo_front=[photo(), photo()]).status_code, 400)
+        self.assertEqual(ReturnRequest.query.count()+ExchangeRequest.query.count(), 0)
+        self.assertEqual(list(Path(self.directory.name).rglob("*.jpg")), [])
+
+    def test_incomplete_address_rejected(self):
+        self.assertEqual(self.submit(pickup_address=json.dumps({"name": "Only name"})).status_code, 400)
+        self.assertEqual(self.submit(pickup_address="not json").status_code, 400)
+
+    def test_cannot_submit_for_another_customer(self):
+        other = Customer(email="other@example.com"); db.session.add(other); db.session.commit()
+        self.customer_headers = {"Authorization": "Bearer " + issue_token(other)}
+        self.assertEqual(self.submit().status_code, 404)
+
+    def test_gift_card_flow_emails_and_pickup_address(self):
+        number = self.submit().json["return_number"]
+        with patch("app.services.shipping_service.schedule_reverse_pickup", return_value=("delhivery", "TRACK", "scheduled")) as pickup:
+            self.assertEqual(self.action(number, "accept-photos").status_code, 200)
+            self.assertEqual(pickup.call_args.kwargs["pickup_address"]["address1"], "20 Pickup Road")
+        self.assertEqual(self.action(number, "mark-parcel-received").status_code, 200)
+        with patch("app.services.shopify_client.issue_gift_card", return_value={"code": "GIFT-123"}):
+            self.assertEqual(self.action(number, "accept-parcel").status_code, 200)
+        self.assertEqual(Notification.query.count(), 4)
+        self.assertIn("GIFT-123", Notification.query.filter_by(event_key=number+":gift_card").one().html)
+        self.assertEqual(self.action(number, "accept-parcel").status_code, 400)
+        self.assertEqual(Notification.query.count(), 4)
+
+    def test_manual_fallback_emails_do_not_claim_booking_or_payment(self):
+        number = self.submit(refund_mode="account").json["return_number"]
+        self.assertEqual(self.action(number, "accept-photos").status_code, 200)
+        self.assertIsNotNone(Notification.query.filter_by(event_key=number+":pickup_pending").first())
+        self.action(number, "mark-parcel-received")
+        self.assertEqual(self.action(number, "accept-parcel").status_code, 200)
+        self.assertIsNotNone(Notification.query.filter_by(event_key=number+":refund_approved").first())
+
+    def test_rejection_reason_escaped(self):
+        number = self.submit().json["return_number"]
+        self.assertEqual(self.action(number, "reject-photos", rejection_reason="other", note="<script>bad</script>").status_code, 200)
+        html = Notification.query.filter_by(event_key=number+":rejected").one().html
+        self.assertIn("&lt;script&gt;", html)
+        self.assertIn("photo review", html)
+
+    def test_email_failure_does_not_fail_request_and_can_retry(self):
+        self.app.config.update(RESEND_API_KEY="fake", TESTING_MODE=False)
+        result = self.submit()
+        self.assertEqual(result.status_code, 201)
+        self.assertIsNone(Notification.query.one().sent_at)
+        with patch("requests.post") as send:
+            deliver_pending()
+            self.assertIsNotNone(Notification.query.one().sent_at)
+            deliver_pending()
+            self.assertEqual(send.call_count, 1)
+            self.assertIn("Idempotency-Key", send.call_args.kwargs["headers"])
+
+    def test_exchange_retention_and_quota(self):
+        self.submit("exchange")
+        req = ExchangeRequest.query.one()
+        req.created_at = datetime.utcnow()-timedelta(days=121); db.session.commit()
+        cleanup_old_photos()
+        self.assertEqual(req.photo_urls, [])
+        self.assertEqual(list(Path(self.directory.name).rglob("*.jpg")), [])
+
+    def test_full_storage_rejects_upload_without_orphan_photos(self):
+        self.app.config["MAX_PHOTO_STORAGE_MB"] = 0
+        self.assertEqual(self.submit().status_code, 400)
+        self.assertEqual(list(Path(self.directory.name).rglob("*.jpg")), [])
+        self.assertEqual(ReturnRequest.query.count(), 0)
+
+    def test_exchange_completion_emails(self):
+        number = self.submit("exchange").json["exchange_number"]
+        self.action(number, "accept-photos", kind="exchange")
+        self.action(number, "mark-parcel-received", kind="exchange")
+        with patch("app.services.shipping_service.schedule_forward_shipment", return_value=("delhivery", "OUTBOUND", "scheduled")):
+            self.assertEqual(self.action(number, "accept-parcel", kind="exchange").status_code, 200)
+        message = Notification.query.filter_by(event_key=number+":replacement_booked").one()
+        self.assertIn("OUTBOUND", message.html)
+        self.assertIn("booked", message.subject)
+
+    def test_sync_does_not_overwrite_pickup_snapshot(self):
+        from app.services.sync_service import upsert_order
+        self.submit()
+        upsert_order({"id": 100, "order_number": 100, "customer": {"id": 1, "email": "customer@example.com"},
+                      "shipping_address": {**ADDRESS, "address1": "New shipping address"}})
+        req = ReturnRequest.query.one()
+        self.assertEqual(req.pickup_address["address1"], "20 Pickup Road")
+        self.assertEqual(req.order_item.order.shipping_address["address1"], "New shipping address")
+
+    def test_shared_testing_flag_admin_console_without_resend(self):
+        self.app.config.update(TESTING_MODE=True, DEBUG=False, RESEND_API_KEY="fake")
+        payload = dict(email="staff@example.com", secret="test-admin-secret")
+        with patch("resend.Emails.send") as send, patch("builtins.print") as output:
+            result = self.client.post("/api/admin/auth/request-otp", json=payload)
+        send.assert_not_called()
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(result.json["delivery"], "console")
+        code = output.call_args.args[0].rsplit(": ", 1)[1]
+        self.assertNotIn(code, result.get_data(as_text=True))
+        self.assertEqual(self.client.post("/api/admin/auth/verify-otp", json={**payload, "otp": code}).status_code, 200)
+
+    def test_shared_testing_flag_customer_console_and_verification(self):
+        self.app.config.update(TESTING_MODE=True, DEBUG=False, RESEND_API_KEY="fake")
+        payload = dict(email="customer@example.com")
+        with patch("resend.Emails.send") as send, patch("builtins.print") as output, patch("app.services.shopify_client.find_customer_by_email", return_value={"id": "100"}):
+            result = self.client.post("/api/auth/request-otp", json=payload)
+        send.assert_not_called()
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(result.json["delivery"], "console")
+        code = output.call_args.args[0].rsplit(": ", 1)[1]
+        self.assertNotIn(code, result.get_data(as_text=True))
+        self.assertEqual(self.client.post("/api/auth/verify-otp", json={**payload, "otp": code}).status_code, 200)
+
+    def test_production_email_failures_do_not_log_codes_even_in_debug(self):
+        self.app.config.update(TESTING_MODE=False, DEBUG=True, RESEND_API_KEY="fake")
+        with patch("resend.Emails.send", side_effect=RuntimeError("unverified domain")), patch("builtins.print") as output, patch("app.services.shopify_client.find_customer_by_email", return_value={"id": "100"}):
+            admin = self.client.post("/api/admin/auth/request-otp", json=dict(email="staff@example.com", secret="test-admin-secret"))
+            customer = self.client.post("/api/auth/request-otp", json=dict(email="customer@example.com"))
+        self.assertEqual(admin.status_code, 503)
+        self.assertEqual(customer.status_code, 503)
+        output.assert_not_called()
+
+    def test_testing_mode_does_not_send_status_emails(self):
+        self.app.config.update(TESTING_MODE=True, RESEND_API_KEY="fake")
+        with patch("requests.post") as send:
+            self.assertEqual(self.submit().status_code, 201)
+        send.assert_not_called()
+    def test_testing_mode_does_not_bypass_webhook_signature(self):
+        self.app.config.update(TESTING_MODE=True, SHOPIFY_WEBHOOK_SECRET=None)
+        result = self.client.post("/api/webhooks/shopify/orders-create", json={})
+        self.assertEqual(result.status_code, 401)
+
+    def test_testing_mode_still_uses_shopify_customer_lookup(self):
+        from app.services.shopify_client import find_customer_by_email
+        self.app.config["TESTING_MODE"] = True
+        with patch("app.services.shopify_client._headers", return_value={}), patch("requests.get") as get:
+            get.return_value.json.return_value = {"customers": [{"id": 42}]}
+            self.assertEqual(find_customer_by_email("customer@example.com"), {"id": 42})
+            get.assert_called_once()
+
+
+
+if __name__ == "__main__":
+    unittest.main()

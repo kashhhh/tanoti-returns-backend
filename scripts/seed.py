@@ -1,6 +1,6 @@
 """
 Seeds local test data so you can exercise the full return/exchange flow
-without a live Shopify connection. Pairs with MOCK_SHOPIFY_MODE=true.
+for database-only development. Customer login still validates against the live Shopify store.
 
 Usage:
     python scripts/seed.py

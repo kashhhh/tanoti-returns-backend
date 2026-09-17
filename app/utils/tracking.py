@@ -57,13 +57,13 @@ def build_timeline(obj, kind: str):
 
     if kind == "return":
         steps.append({
-            "label": "Refund issued",
+            "label": "Gift card issued" if obj.refund_mode == "gift_card" else "Refund approved",
             "date": obj.completed_at.isoformat() if obj.completed_at else None,
             "done": obj.status == "completed",
         })
     else:
         steps.append({
-            "label": "Replacement shipped" if obj.outbound_carrier != "manual" else "Replacement being arranged",
+            "label": "Replacement shipment booked" if obj.outbound_tracking_id else "Replacement being arranged",
             "date": obj.completed_at.isoformat() if obj.completed_at else None,
             "done": obj.status == "completed",
             "tracking_id": obj.outbound_tracking_id,

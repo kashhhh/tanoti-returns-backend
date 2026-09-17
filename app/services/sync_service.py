@@ -50,6 +50,9 @@ def upsert_order(shopify_order: dict, _image_cache: dict = None) -> Order:
     order.customer_id = customer.id
     order.payment_method = _parse_payment_method(shopify_order)
     order.financial_status = shopify_order.get("financial_status")
+    if "shipping_address" in shopify_order:
+        from app.services.address_service import normalize_address
+        order.shipping_address = normalize_address(shopify_order.get("shipping_address") or {})
 
     fulfillments = shopify_order.get("fulfillments") or []
     if fulfillments:

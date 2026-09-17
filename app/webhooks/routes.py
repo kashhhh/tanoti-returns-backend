@@ -6,8 +6,6 @@ webhooks_bp = Blueprint("webhooks", __name__)
 
 
 def _verify_or_reject():
-    if current_app.config["MOCK_SHOPIFY_MODE"]:
-        return None  # skip HMAC check in local/mock mode
     hmac_header = request.headers.get("X-Shopify-Hmac-Sha256")
     if not shopify_client.verify_webhook_hmac(request.get_data(), hmac_header):
         return jsonify({"error": "Invalid webhook signature"}), 401

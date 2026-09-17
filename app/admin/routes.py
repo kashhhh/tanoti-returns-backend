@@ -8,7 +8,8 @@ from app.models import (
     RejectionReason, RefundMode,
 )
 from app.utils.admin_auth import admin_required
-from app.services import shopify_client, email_service, shipping_service
+from app.services import shopify_client, shipping_service
+from app.services.notification_service import queue_update, deliver_pending
 
 admin_bp = Blueprint("admin", __name__)
 
@@ -41,6 +42,9 @@ def _row(obj, kind: str) -> dict:
         "reason": obj.reason.value,
         "reason_other_text": obj.reason_other_text,
         "customer_email": obj.customer.email,
+        "pickup_address": obj.pickup_address or obj.order_item.order.shipping_address or {},
+        "shipping_address": obj.order_item.order.shipping_address or {},
+        "photo_urls": obj.photo_urls or [],
         "repeat_returner": _repeat_returner_flag(obj.customer_id),
         "pickup_carrier": obj.pickup_carrier,
         "pickup_tracking_id": obj.pickup_tracking_id,
@@ -100,7 +104,8 @@ def accept_photos(kind, number):
 
     try:
         carrier, tracking_id, status = shipping_service.schedule_reverse_pickup(
-            order=req.order_item.order, item=req.order_item, request_number=number
+            order=req.order_item.order, item=req.order_item, request_number=number,
+            pickup_address=req.pickup_address
         )
         req.pickup_carrier = carrier
         req.pickup_tracking_id = tracking_id
@@ -110,9 +115,9 @@ def accept_photos(kind, number):
         req.pickup_status = "manual_scheduling_required"
 
     req.status = RequestStatus.PICKUP_SCHEDULED
+    queue_update(req, kind, "pickup_booked" if req.pickup_tracking_id else "pickup_pending")
     db.session.commit()
-
-    email_service.send_status_update_email(req.customer.email, number, req.status.value)
+    deliver_pending(limit=1)
     return jsonify(_row(req, kind))
 
 
@@ -140,9 +145,9 @@ def mark_parcel_received(kind, number):
 
     req.parcel_received_at = datetime.utcnow()
     req.status = RequestStatus.PARCEL_RECEIVED
+    queue_update(req, kind, "parcel_received")
     db.session.commit()
-
-    email_service.send_status_update_email(req.customer.email, number, req.status.value)
+    deliver_pending(limit=1)
     return jsonify(_row(req, kind))
 
 
@@ -165,6 +170,8 @@ def accept_parcel(kind, number):
                     amount=str(req.net_refund_amount), note=f"Refund for {req.return_number}"
                 )
                 req.gift_card_code = gift_card.get("code")
+                if not req.gift_card_code:
+                    raise ValueError("Shopify did not return a gift card code")
             except Exception as e:
                 db.session.commit()
                 return jsonify({"error": f"Parcel accepted, but gift card issuance failed: {e}"}), 502
@@ -188,8 +195,13 @@ def accept_parcel(kind, number):
         req.status = RequestStatus.COMPLETED
         req.completed_at = datetime.utcnow()
 
+    if kind == "return":
+        event = "gift_card" if req.refund_mode == RefundMode.GIFT_CARD else "refund_approved"
+    else:
+        event = "replacement_booked" if req.outbound_tracking_id else "replacement_pending"
+    queue_update(req, kind, event)
     db.session.commit()
-    email_service.send_status_update_email(req.customer.email, number, req.status.value)
+    deliver_pending(limit=1)
     return jsonify(_row(req, kind))
 
 
@@ -220,15 +232,9 @@ def _reject(req, kind, number, stage: str):
         req.photo_decision_at = datetime.utcnow()
     else:
         req.parcel_decision_at = datetime.utcnow()
+    queue_update(req, kind, "rejected")
     db.session.commit()
-
-    email_service.send_rejection_email(
-        to_email=req.customer.email,
-        item_title=req.order_item.product_title,
-        request_number=number,
-        rejection_reason=req.rejection_reason.value.replace("_", " "),
-        note=note,
-    )
+    deliver_pending(limit=1)
     return jsonify(_row(req, kind))
 
 

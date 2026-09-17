@@ -1,18 +1,25 @@
-"""
-Minimal admin auth for Phase 1: a single shared admin key checked via
-header, since this is a single-owner backend, not a multi-user admin
-system. Swap for a proper login (Flask-Login / separate admin JWT) in
-Phase 2 if you want multiple staff accounts with distinct permissions.
-"""
+"""Admin sessions require both the shared secret and a staff email OTP."""
 from functools import wraps
-from flask import request, jsonify, current_app
+import jwt
+from flask import current_app, request, jsonify, g
 
 
 def admin_required(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
-        key = request.headers.get("X-Admin-Key")
-        if not key or key != current_app.config.get("ADMIN_API_KEY"):
-            return jsonify({"error": "Unauthorized"}), 401
+        header = request.headers.get("Authorization", "")
+        try:
+            if not current_app.config.get("SECRET_KEY") or current_app.config["SECRET_KEY"] == "change-me-in-prod":
+                raise jwt.InvalidTokenError()
+            if not header.startswith("Bearer "):
+                raise jwt.InvalidTokenError()
+            payload = jwt.decode(header[7:], current_app.config["SECRET_KEY"],
+                                 algorithms=["HS256"], audience="tanoti-admin",
+                                 options={"require": ["exp", "iat", "sub", "role", "aud"]})
+            if payload["role"] != "admin" or payload["sub"] not in current_app.config["ADMIN_EMAILS"]:
+                raise jwt.InvalidTokenError()
+        except jwt.InvalidTokenError:
+            return jsonify({"error": "Admin session expired or invalid. Please log in again."}), 401
+        g.admin_email = payload["sub"]
         return fn(*args, **kwargs)
     return wrapper

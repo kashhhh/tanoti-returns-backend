@@ -27,14 +27,19 @@ def _headers():
     }
 
 
-def schedule_reverse_pickup(*, order, item, request_number: str):
+def schedule_reverse_pickup(*, order, item, request_number: str, pickup_address=None):
     """order/item: local Order/OrderItem model instances.
     Returns (carrier, tracking_id, status) or raises on failure."""
+    address = pickup_address or order.shipping_address or {}
     payload = {
         "pickup_location": current_app.config["DELHIVERY_PICKUP_LOCATION"],
-        "name": order.customer.name,
-        "add": "",  # customer shipping address -- pull from Order/Customer sync
-        "phone": "",  # customer phone, if captured
+        "name": address.get("name") or order.customer.name,
+        "add": ", ".join(filter(None, [address.get("address1"), address.get("address2")])),
+        "phone": address.get("phone", ""),
+        "city": address.get("city", ""),
+        "state": address.get("province", ""),
+        "pin": address.get("zip", ""),
+        "country": address.get("country", ""),
         "order": request_number,
         "products": [{"name": item.product_title, "sku": item.sku, "quantity": 1}],
     }
@@ -46,7 +51,9 @@ def schedule_reverse_pickup(*, order, item, request_number: str):
     )
     resp.raise_for_status()
     data = resp.json()
-    return "delhivery", data.get("pickup_id"), data.get("status", "scheduled")
+    if not data.get("pickup_id"):
+        raise ValueError("Pickup booking was not confirmed by the carrier")
+    return "delhivery", data["pickup_id"], data.get("status", "scheduled")
 
 
 def schedule_forward_shipment(*, order, item, requested_size: str, request_number: str):
@@ -61,11 +68,16 @@ def schedule_forward_shipment(*, order, item, requested_size: str, request_numbe
     SKU/stock lookup (this currently reuses the original item's SKU
     pattern, which likely needs a real Shopify variant lookup by size to
     get the correct SKU for the replacement)."""
+    address = order.shipping_address or {}
     payload = {
         "shipments": [{
             "name": order.customer.name,
-            "add": "",  # customer shipping address
-            "phone": "",  # customer phone
+            "add": ", ".join(filter(None, [address.get("address1"), address.get("address2")])),
+            "phone": address.get("phone", ""),
+            "city": address.get("city", ""),
+            "state": address.get("province", ""),
+            "pin": address.get("zip", ""),
+            "country": address.get("country", ""),
             "order": request_number,
             "payment_mode": "Prepaid",  # exchanges don't collect payment again
             "products_desc": f"{item.product_title} (exchange, size {requested_size})",
@@ -82,6 +94,8 @@ def schedule_forward_shipment(*, order, item, requested_size: str, request_numbe
     data = resp.json()
     packages = data.get("packages", [{}])
     waybill = packages[0].get("waybill") if packages else None
+    if not waybill:
+        raise ValueError("Replacement booking was not confirmed by the carrier")
     return "delhivery", waybill, data.get("status", "scheduled")
 
 

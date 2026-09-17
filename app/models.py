@@ -95,6 +95,7 @@ class Order(db.Model):
 
     payment_method = db.Column(db.Enum(PaymentMethod), nullable=False)
     financial_status = db.Column(db.String(32))       # paid / pending / refunded etc, from Shopify
+    shipping_address = db.Column(db.JSON, nullable=True)
 
     fulfilled_at = db.Column(db.DateTime, nullable=True)   # return window clock starts here
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
@@ -166,6 +167,7 @@ class ReturnRequest(db.Model):
     reason = db.Column(db.Enum(ReturnReason), nullable=False)
     reason_other_text = db.Column(db.Text, nullable=True)
     photo_urls = db.Column(db.JSON, default=list)   # min 2 (front/back)
+    pickup_address = db.Column(db.JSON, nullable=True)
 
     refund_mode = db.Column(db.Enum(RefundMode), nullable=False)
     refund_amount = db.Column(db.Numeric(10, 2), nullable=False)       # item price
@@ -204,6 +206,8 @@ class ExchangeRequest(db.Model):
     customer_id = db.Column(db.Integer, db.ForeignKey("customers.id"), nullable=False)
 
     requested_size = db.Column(db.String(32), nullable=False)
+    photo_urls = db.Column(db.JSON, default=list)
+    pickup_address = db.Column(db.JSON, nullable=True)
     reason = db.Column(db.Enum(ExchangeReason), nullable=False)
     reason_other_text = db.Column(db.Text, nullable=True)
 
@@ -267,3 +271,25 @@ class OTPToken(db.Model):
     resend_count = db.Column(db.Integer, default=0)
     consumed = db.Column(db.Boolean, default=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+
+class AdminOTP(db.Model):
+    __tablename__ = "admin_otps"
+    email = db.Column(db.String(255), primary_key=True)
+    otp_hash = db.Column(db.String(64), nullable=False)
+    expires_at = db.Column(db.DateTime, nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False)
+    attempts = db.Column(db.Integer, nullable=False, default=0)
+    consumed = db.Column(db.Boolean, nullable=False, default=False)
+
+
+class Notification(db.Model):
+    __tablename__ = "notifications"
+    id = db.Column(db.Integer, primary_key=True)
+    event_key = db.Column(db.String(100), nullable=False, unique=True)
+    recipient = db.Column(db.String(255), nullable=False)
+    subject = db.Column(db.String(255), nullable=False)
+    html = db.Column(db.Text, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    sent_at = db.Column(db.DateTime)
+    attempts = db.Column(db.Integer, default=0, nullable=False)

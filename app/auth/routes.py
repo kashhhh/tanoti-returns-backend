@@ -1,5 +1,5 @@
 import hashlib
-import random
+import secrets
 from datetime import datetime, timedelta
 
 from flask import Blueprint, request, jsonify, current_app
@@ -18,7 +18,7 @@ def _hash_otp(otp: str) -> str:
 
 def _generate_otp() -> str:
     length = current_app.config["OTP_LENGTH"]
-    return "".join(str(random.randint(0, 9)) for _ in range(length))
+    return "".join(secrets.choice("0123456789") for _ in range(length))
 
 
 @auth_bp.route("/request-otp", methods=["POST"])
@@ -50,8 +50,14 @@ def request_otp():
     db.session.add(token)
     db.session.commit()
 
-    email_service.send_otp_email(email, otp)
-    return jsonify({"message": "OTP sent", "expires_in_minutes": current_app.config["OTP_EXPIRY_MINUTES"]})
+    try:
+        email_service.send_otp_email(email, otp)
+    except Exception:
+        current_app.logger.warning("Customer OTP delivery failed")
+        return jsonify({"error": "Could not send the code. Please try again shortly."}), 503
+    delivery = "console" if current_app.config.get("TESTING_MODE") else "email"
+    return jsonify({"message": "Code available in the backend console." if delivery == "console" else "OTP sent",
+                    "delivery": delivery, "expires_in_minutes": current_app.config["OTP_EXPIRY_MINUTES"]})
 
 
 @auth_bp.route("/resend-otp", methods=["POST"])
@@ -107,7 +113,7 @@ def verify_otp():
 
     # First-time login: pull their order history so it's ready to browse.
     # (Subsequent syncs happen via webhooks + the manual /resync endpoint.)
-    if not customer.orders:
+    if not customer.orders or any(not order.shipping_address for order in customer.orders):
         sync_service.sync_orders_for_customer(customer.shopify_customer_id)
 
     jwt_token = issue_token(customer)

@@ -7,6 +7,8 @@ from app.models import (
 )
 from app.utils.decorators import login_required
 from app.services import storage_service, shopify_client, sync_service
+from app.services.address_service import pickup_from_form
+from app.services.notification_service import queue_update, deliver_pending
 from app.utils.numbering import next_return_number, next_exchange_number
 from app.utils.tracking import build_timeline
 
@@ -142,6 +144,7 @@ def get_order_item(item_id):
         "image_url": item.image_url,
         "order_number": item.order.order_number,
         "payment_method": item.order.payment_method.value,
+        "shipping_address": item.order.shipping_address or {},
         "deduction_enabled": settings.deduction_enabled,
         "deduction_amount": str(settings.deduction_amount) if settings.deduction_enabled else "0",
         "available_sizes": available_sizes,
@@ -167,7 +170,7 @@ def submit_exchange(item_id):
     if item.active_request() is not None:
         return jsonify({"error": "This item already has an active request"}), 400
 
-    data = request.json or {}
+    data = request.form
     size = data.get("size")
     reason = data.get("reason")
     reason_other = data.get("reason_other_text")
@@ -177,8 +180,22 @@ def submit_exchange(item_id):
     if reason == ExchangeReason.OTHER.value and not reason_other:
         return jsonify({"error": "reason_other_text is required when reason is 'other'"}), 400
 
+    try:
+        pickup_address = pickup_from_form(request.form, item.order)
+        photos = storage_service.required_photos(request.files)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    number = next_exchange_number()
+    try:
+        photo_urls = storage_service.save_request_photos(photos, number)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
     exchange = ExchangeRequest(
-        exchange_number=next_exchange_number(),
+        order_item=item,
+        customer=g.customer,
+        exchange_number=number,
+        photo_urls=photo_urls,
+        pickup_address=pickup_address,
         order_item_id=item.id,
         customer_id=g.customer.id,
         requested_size=size,
@@ -186,14 +203,16 @@ def submit_exchange(item_id):
         reason_other_text=reason_other,
     )
     db.session.add(exchange)
+    queue_update(exchange, "exchange", "received")
     db.session.commit()
+    deliver_pending(limit=1)
     return jsonify({"exchange_number": exchange.exchange_number, "status": exchange.status.value}), 201
 
 
 @customer_bp.route("/order-items/<int:item_id>/return", methods=["POST"])
 @login_required
 def submit_return(item_id):
-    """multipart/form-data: reason, reason_other_text, refund_mode, photos[] (min 2)"""
+    """multipart/form-data: reason, reason_other_text, refund_mode, photo_front, photo_back, pickup_address"""
     item = OrderItem.query.get_or_404(item_id)
     if item.order.customer_id != g.customer.id:
         return jsonify({"error": "Not found"}), 404
@@ -203,7 +222,11 @@ def submit_return(item_id):
     reason = request.form.get("reason")
     reason_other = request.form.get("reason_other_text")
     refund_mode = request.form.get("refund_mode")
-    photos = request.files.getlist("photos")
+    try:
+        pickup_address = pickup_from_form(request.form, item.order)
+        photos = storage_service.required_photos(request.files)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
 
     if reason not in ReturnReason._value2member_map_:
         return jsonify({"error": "A valid reason is required"}), 400
@@ -219,13 +242,20 @@ def submit_return(item_id):
 
     return_number = next_return_number()
 
-    photo_urls = [storage_service.upload_return_photo(p, return_number) for p in photos]
+    try:
+        photo_urls = storage_service.save_request_photos(photos, return_number)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
 
     settings = AdminSettings.get()
     deduction = settings.deduction_amount if settings.deduction_enabled else 0
+    deduction = min(deduction, item.price)
     net_amount = item.price - deduction
 
     r = ReturnRequest(
+        order_item=item,
+        customer=g.customer,
+        pickup_address=pickup_address,
         return_number=return_number,
         order_item_id=item.id,
         customer_id=g.customer.id,
@@ -238,7 +268,9 @@ def submit_return(item_id):
         net_refund_amount=net_amount,
     )
     db.session.add(r)
+    queue_update(r, "return", "received")
     db.session.commit()
+    deliver_pending(limit=1)
 
     return jsonify({
         "return_number": r.return_number,

@@ -34,7 +34,9 @@ def verify_webhook_hmac(request_data: bytes, hmac_header: str) -> bool:
     """Validates the X-Shopify-Hmac-Sha256 header on incoming webhooks
     using the signing secret shown on the store's Settings > Notifications
     > Webhooks page (independent of the client credentials flow below)."""
-    secret = current_app.config.get("SHOPIFY_WEBHOOK_SECRET", "")
+    secret = current_app.config.get("SHOPIFY_WEBHOOK_SECRET")
+    if not secret:
+        return False
     digest = hmac.new(secret.encode(), request_data, hashlib.sha256).digest()
     computed = base64.b64encode(digest).decode()
     return hmac.compare_digest(computed, hmac_header or "")
@@ -84,12 +86,6 @@ def _headers():
 def find_customer_by_email(email: str):
     """Used at login time to validate the email actually belongs to a
     real Tanoti customer before sending an OTP."""
-    if current_app.config["MOCK_SHOPIFY_MODE"]:
-        # Local testing: any email "logs in" as a fake Shopify customer.
-        # Pair with scripts/seed.py, which creates a matching local
-        # Customer + Order for a specific test email.
-        return {"id": "mock-1000", "email": email, "first_name": "Test", "last_name": "Customer"}
-
     resp = requests.get(
         f"{_base_url()}/customers/search.json",
         headers=_headers(),
@@ -104,11 +100,6 @@ def find_customer_by_email(email: str):
 def fetch_orders_for_customer(shopify_customer_id: str):
     """Pulls orders for a customer -- used by the sync job / on-demand
     refresh so the local Order/OrderItem cache stays current."""
-    if current_app.config["MOCK_SHOPIFY_MODE"]:
-        # In mock mode, test orders come from scripts/seed.py directly --
-        # nothing to pull from a real store.
-        return []
-
     resp = requests.get(
         f"{_base_url()}/customers/{shopify_customer_id}/orders.json",
         headers=_headers(),
@@ -122,7 +113,7 @@ def get_product_image_url(shopify_product_id: str):
     """Order line items don't include image data in Shopify's REST API --
     the image has to be fetched separately from the product. Used by
     sync_service to fill in OrderItem.image_url."""
-    if current_app.config["MOCK_SHOPIFY_MODE"] or not shopify_product_id:
+    if not shopify_product_id:
         return None
 
     resp = requests.get(
@@ -140,14 +131,6 @@ def get_variants_for_product(shopify_product_id: str):
     """Live stock check used by get_order_item() to decide which sizes
     are selectable in the exchange dropdown -- out-of-stock sizes get
     excluded per the 'block the option in the dropdown' decision."""
-    if current_app.config["MOCK_SHOPIFY_MODE"]:
-        return [
-            {"size": "S", "in_stock": True},
-            {"size": "M", "in_stock": True},
-            {"size": "L", "in_stock": False},
-            {"size": "XL", "in_stock": True},
-        ]
-
     resp = requests.get(
         f"{_base_url()}/products/{shopify_product_id}/variants.json",
         headers=_headers(),
@@ -166,9 +149,6 @@ def issue_gift_card(amount: str, note: str = ""):
     string, e.g. '1499.00') and returns its code + admin GID.
     Called when the owner accepts a return with refund_mode = gift_card.
     """
-    if current_app.config["MOCK_SHOPIFY_MODE"]:
-        return {"code": f"MOCK-GC-{amount.replace('.', '')}"}
-
     payload = {
         "gift_card": {
             "initial_value": amount,

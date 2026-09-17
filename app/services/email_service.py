@@ -10,15 +10,16 @@ def _configure():
 
 
 def _local_mode() -> bool:
-    """No Resend key configured -- print instead of sending, so local
-    testing doesn't need real email credentials."""
-    return not current_app.config.get("RESEND_API_KEY")
+    """Explicit console-only email delivery for both login flows."""
+    return current_app.config.get("TESTING_MODE", False)
 
 
 def send_otp_email(to_email: str, otp_code: str):
     if _local_mode():
-        print(f"[LOCAL EMAIL] OTP for {to_email}: {otp_code}")
-        return
+        print(f"[LOCAL EMAIL] OTP for {to_email}: {otp_code}", flush=True)
+        return "console"
+    if not current_app.config.get("RESEND_API_KEY"):
+        raise RuntimeError("Configure Resend to send login codes")
     _configure()
     resend.Emails.send({
         "from": current_app.config["EMAIL_FROM"],
@@ -62,3 +63,16 @@ def send_status_update_email(to_email: str, request_number: str, status: str):
         "subject": f"Your request {request_number} is now {status}",
         "html": f"<p>Your request <strong>{request_number}</strong> status: <strong>{status}</strong>.</p>",
     })
+
+
+def send_admin_otp_email(to_email, code):
+    if _local_mode():
+        print(f"[LOCAL ADMIN EMAIL] OTP for {to_email}: {code}", flush=True)
+        return "console"
+    if not current_app.config.get("RESEND_API_KEY"):
+        raise RuntimeError("Configure Resend to send admin login codes")
+    _configure()
+    resend.Emails.send({"from": current_app.config["EMAIL_FROM"], "to": [to_email],
+                        "subject": "Your Tanoti admin login code",
+                        "html": f"<p>Your admin login code is <strong>{code}</strong>. It expires in 10 minutes.</p>"})
+    return "email"

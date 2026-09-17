@@ -4,4 +4,4 @@ __pycache__/
 .env
 uploads/
 local_uploads/
-migrations/versions/
+migrations/

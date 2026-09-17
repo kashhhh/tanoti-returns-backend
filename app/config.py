@@ -1,4 +1,5 @@
 import os
+from app.admin_setup import ADMIN_EMAILS
 from pathlib import Path
 
 # backend/ directory -- computed from this file's own location, not the
@@ -10,6 +11,11 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 class Config:
     SECRET_KEY = os.environ.get("SECRET_KEY", "change-me-in-prod")
     ADMIN_API_KEY = os.environ.get("ADMIN_API_KEY", "change-me-in-prod")
+    ADMIN_SECRET_KEY = os.environ.get("ADMIN_SECRET_KEY") or os.environ.get("ADMIN_API_KEY", "")
+    ADMIN_EMAILS = ADMIN_EMAILS
+    ADMIN_SESSION_HOURS = 8
+    TESTING_MODE = os.environ.get("TESTING_MODE", "false").lower() == "true"
+    MAX_CONTENT_LENGTH = 22 * 1024 * 1024
     CORS_ORIGINS = os.environ.get("CORS_ORIGINS", "http://localhost:5173")
     SQLALCHEMY_DATABASE_URI = os.environ.get(
         "DATABASE_URL", "postgresql://localhost/tanoti_returns_v2"
@@ -39,11 +45,6 @@ class Config:
     # Delhivery
     DELHIVERY_API_TOKEN = os.environ.get("DELHIVERY_API_TOKEN")
     DELHIVERY_PICKUP_LOCATION = os.environ.get("DELHIVERY_PICKUP_LOCATION")  # your registered warehouse name
-
-    # Local dev conveniences -- do NOT enable in production.
-    # MOCK_SHOPIFY_MODE lets you log in with any email without a real
-    # Shopify store connection (pairs with scripts/seed.py test data).
-    MOCK_SHOPIFY_MODE = os.environ.get("MOCK_SHOPIFY_MODE", "false").lower() == "true"
 
     # OTP
     OTP_LENGTH = 6

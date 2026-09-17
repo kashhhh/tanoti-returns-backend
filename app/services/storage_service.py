@@ -43,7 +43,6 @@ def upload_return_photo(file_storage, return_number: str) -> str:
     if ext not in ALLOWED_EXTENSIONS:
         raise ValueError(f"Unsupported file type: {ext}")
 
-    _enforce_storage_quota()
 
     return_dir = _photos_dir() / "returns" / return_number
     return_dir.mkdir(parents=True, exist_ok=True)
@@ -68,51 +67,75 @@ def _dir_size_mb(path: Path) -> float:
     return total / (1024 * 1024)
 
 
+def _all_photo_requests():
+    from app.models import ReturnRequest, ExchangeRequest
+    return ReturnRequest.query.all() + ExchangeRequest.query.all()
+
+
+def _number(obj):
+    return getattr(obj, "return_number", None) or obj.exchange_number
+
+
 def _enforce_storage_quota():
-    """If the photos directory is at/over the configured budget, delete
-    the oldest returns' photos until there's room. Prefers trimming
-    already-decided requests first -- only falls back to pending ones
-    (which the owner hasn't reviewed yet) if that's not enough, since
-    those photos may still matter for a fraud judgment call."""
-    from app.models import ReturnRequest, RequestStatus
+    from app.models import RequestStatus
     from app.extensions import db
+    budget = current_app.config["MAX_PHOTO_STORAGE_MB"]
+    # Preserve unreviewed evidence. If completed requests cannot free enough
+    # room, reject the new upload instead of deleting pending photos.
+    decided = [r for r in _all_photo_requests() if r.status in (RequestStatus.COMPLETED, RequestStatus.REJECTED)]
+    for obj in sorted(decided, key=lambda r: r.created_at):
+        if _dir_size_mb(_photos_dir()) <= budget:
+            break
+        if obj.photo_urls:
+            delete_photos_for_return(_number(obj))
+            obj.photo_urls = []
+    db.session.commit()
+    if _dir_size_mb(_photos_dir()) > budget:
+        raise ValueError("Photo storage is full. Please contact the store or try again later.")
 
-    budget_mb = current_app.config["MAX_PHOTO_STORAGE_MB"]
-    photos_dir = _photos_dir()
 
-    if _dir_size_mb(photos_dir) < budget_mb:
-        return
+def required_photos(files):
+    photos = []
+    for side in ("front", "back"):
+        selected = files.getlist(f"photo_{side}")
+        if len(selected) != 1 or not selected[0].filename:
+            raise ValueError(f"Please upload exactly one {side} photo")
+        photo = selected[0]
+        if photo.filename.rsplit(".", 1)[-1].lower() not in ALLOWED_EXTENSIONS:
+            raise ValueError("Photos must be JPG, PNG or WebP")
+        photo.stream.seek(0, 2)
+        size = photo.stream.tell()
+        photo.stream.seek(0)
+        if size > 10 * 1024 * 1024:
+            raise ValueError("Each photo must be 10 MB or smaller")
+        try:
+            with Image.open(photo.stream) as img:
+                if img.width * img.height > 25_000_000:
+                    raise ValueError("Photo resolution is too large; maximum 25 megapixels")
+                img.verify()
+        except Exception as exc:
+            raise ValueError("Please upload a valid JPG, PNG or WebP photo (maximum 25 megapixels)") from exc
+        finally:
+            photo.stream.seek(0)
+        photos.append(photo)
+    return photos
 
-    for exclude_pending in (True, False):
-        query = ReturnRequest.query.filter(ReturnRequest.photo_urls.isnot(None))
-        if exclude_pending:
-            query = query.filter(ReturnRequest.status != RequestStatus.PENDING)
-        oldest_first = query.order_by(ReturnRequest.created_at.asc()).all()
 
-        for r in oldest_first:
-            if not r.photo_urls:
-                continue
-            delete_photos_for_return(r.return_number)
-            r.photo_urls = []
-            db.session.commit()
-            if _dir_size_mb(photos_dir) < budget_mb:
-                return
+def save_request_photos(photos, number):
+    try:
+        urls = [upload_return_photo(photo, number) for photo in photos]
+        _enforce_storage_quota()
+        return urls
+    except Exception as exc:
+        delete_photos_for_return(number)
+        raise ValueError(str(exc) if isinstance(exc, ValueError) else "Could not save photos. Please try again.") from exc
 
 
 def cleanup_old_photos():
-    """Time-based cleanup, independent of the quota-based one above --
-    run daily via cron. Deletes photos older than PHOTO_RETENTION_DAYS
-    regardless of current storage usage."""
-    from app.models import ReturnRequest
     from app.extensions import db
-
     cutoff = datetime.utcnow() - timedelta(days=current_app.config["PHOTO_RETENTION_DAYS"])
-    old_requests = ReturnRequest.query.filter(
-        ReturnRequest.created_at < cutoff,
-        ReturnRequest.photo_urls.isnot(None),
-    ).all()
-    for r in old_requests:
-        if r.photo_urls:
-            delete_photos_for_return(r.return_number)
-            r.photo_urls = []
+    for obj in _all_photo_requests():
+        if obj.created_at < cutoff and obj.photo_urls:
+            delete_photos_for_return(_number(obj))
+            obj.photo_urls = []
     db.session.commit()

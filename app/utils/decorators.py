@@ -33,6 +33,8 @@ def login_required(fn):
         except jwt.InvalidTokenError:
             return jsonify({"error": "Invalid session"}), 401
 
+        if payload.get("role") == "admin" or not payload.get("customer_id"):
+            return jsonify({"error": "Invalid customer session"}), 401
         customer = Customer.query.get(payload["customer_id"])
         if not customer:
             return jsonify({"error": "Customer not found"}), 401
