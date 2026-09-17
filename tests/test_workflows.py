@@ -278,6 +278,72 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(find_customer_by_email("customer@example.com"), {"id": 42})
             get.assert_called_once()
 
+    def seed_listing(self):
+        from app.models import ReturnReason, ExchangeReason, RefundMode
+        item = db.session.get(OrderItem, self.item_id)
+        for i in range(37):
+            fields = dict(order_item=item, customer=item.order.customer, created_at=datetime(2026, 8, 1) + timedelta(days=i//2), status=RequestStatus.PENDING)
+            if i % 2:
+                obj = ExchangeRequest(exchange_number=f"EXC-{i:06d}", requested_size="M", reason=ExchangeReason.SIZE_TOO_SMALL, **fields)
+            else:
+                obj = ReturnRequest(return_number=f"RET-{i:06d}", reason=ReturnReason.SIZE_ISSUE, refund_mode=RefundMode.ACCOUNT, refund_amount=999, net_refund_amount=999, **fields)
+            db.session.add(obj)
+        db.session.commit()
+
+    def test_admin_pagination_combines_types_without_duplicates(self):
+        self.seed_listing()
+        first = self.client.get("/api/admin/requests?stage=pending&per_page=25", headers=self.admin_headers).json
+        second = self.client.get("/api/admin/requests?stage=pending&per_page=25&page=2", headers=self.admin_headers).json
+        self.assertEqual(first["total"], 37)
+        self.assertEqual(first["pages"], 2)
+        self.assertEqual(len(first["requests"]), 25)
+        self.assertEqual(len(second["requests"]), 12)
+        numbers = [r["number"] for r in first["requests"]+second["requests"]]
+        self.assertEqual(len(set(numbers)), 37)
+        dates = [r["date"] for r in first["requests"]+second["requests"]]
+        self.assertEqual(dates, sorted(dates))
+        clamped = self.client.get("/api/admin/requests?page=999", headers=self.admin_headers).json
+        self.assertEqual(clamped["page"], 2)
+
+    def test_admin_search_type_date_and_stage_counts(self):
+        self.seed_listing()
+        result = self.client.get("/api/admin/requests?type=exchange&from=2026-08-01&to=2026-08-02&q=customer@example.com", headers=self.admin_headers).json
+        self.assertEqual(result["total"], 2)
+        self.assertEqual(result["counts"]["pending"], 2)
+        self.assertEqual(result["counts"]["all"], 2)
+        self.assertTrue(all(r["type"] == "exchange" for r in result["requests"]))
+        result = self.client.get("/api/admin/requests?q=EXC-000001", headers=self.admin_headers).json
+        self.assertEqual(result["total"], 1)
+        result = self.client.get("/api/admin/requests?q=%25", headers=self.admin_headers).json
+        self.assertEqual(result["total"], 0)
+
+    def test_admin_filters_distinguish_manual_and_confirmed_outcomes(self):
+        self.seed_listing()
+        returns = ReturnRequest.query.order_by(ReturnRequest.id).all()
+        returns[0].status = RequestStatus.PICKUP_SCHEDULED
+        returns[1].status = RequestStatus.PICKUP_SCHEDULED
+        returns[1].pickup_tracking_id = "PICKUP-123"
+        returns[2].status = RequestStatus.COMPLETED
+        returns[3].status = RequestStatus.COMPLETED
+        returns[3].gift_card_code = "GIFT"
+        exchanges = ExchangeRequest.query.order_by(ExchangeRequest.id).all()
+        exchanges[0].status = RequestStatus.COMPLETED
+        exchanges[1].status = RequestStatus.COMPLETED
+        exchanges[1].outbound_tracking_id = "SHIPMENT"
+        db.session.commit()
+        for stage in ("pickup_pending", "awaiting_parcel", "refund_approved", "gift_card_issued", "replacement_pending", "shipment_booked"):
+            result = self.client.get("/api/admin/requests?stage="+stage, headers=self.admin_headers).json
+            self.assertEqual(result["total"], 1, stage)
+            self.assertEqual(result["requests"][0]["stage"], stage)
+            self.assertEqual(result["counts"]["all"], 37)
+        customer = self.client.get("/api/customer/my-requests", headers=self.customer_headers).json["requests"]
+        self.assertTrue(next(r for r in customer if r["stage"] == "refund_approved")["is_past"])
+        self.assertFalse(next(r for r in customer if r["stage"] == "awaiting_parcel")["is_past"])
+
+    def test_admin_invalid_pagination_and_dates(self):
+        for query in ("page=0", "page=no", "per_page=10000", "stage=invalid", "from=wrong", "from=2026-09-01&to=2026-08-01"):
+            self.assertEqual(self.client.get("/api/admin/requests?"+query, headers=self.admin_headers).status_code, 400)
+
 
 
 if __name__ == "__main__":

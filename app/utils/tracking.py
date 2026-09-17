@@ -35,7 +35,7 @@ def build_timeline(obj, kind: str):
     steps.append({
         "label": "Pickup being arranged" if obj.pickup_carrier == "manual" else "Pickup scheduled",
         "date": obj.photo_decision_at.isoformat() if obj.photo_decision_at else None,
-        "done": obj.pickup_carrier is not None,
+        "done": bool(obj.pickup_tracking_id),
         "tracking_id": obj.pickup_tracking_id,
         "tracking_url": shipping_service.tracking_url(obj.pickup_carrier, obj.pickup_tracking_id),
     })
@@ -65,7 +65,7 @@ def build_timeline(obj, kind: str):
         steps.append({
             "label": "Replacement shipment booked" if obj.outbound_tracking_id else "Replacement being arranged",
             "date": obj.completed_at.isoformat() if obj.completed_at else None,
-            "done": obj.status == "completed",
+            "done": bool(obj.outbound_tracking_id),
             "tracking_id": obj.outbound_tracking_id,
             "tracking_url": shipping_service.tracking_url(obj.outbound_carrier, obj.outbound_tracking_id),
         })

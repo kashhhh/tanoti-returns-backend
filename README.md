@@ -1,3 +1,27 @@
+## Request dashboard and customer navigation
+
+The admin UI opens on Needs review, oldest first, with 25 records per page. The
+request list is paginated in SQL across returns and exchanges together. Query options
+for `GET /api/admin/requests`: `page`, `per_page` (10/25/50), `stage`, `type`
+(all/return/exchange), `q` (order/request number or email), `from`/`to` (inclusive
+submission dates, YYYY-MM-DD in UTC), and `sort` (oldest/newest). Responses include
+`requests`, `page`, `pages`, `per_page`, `total`, and `counts`. Stage counts reflect
+search/type/date filters but include all stages so switching stages remains useful.
+The API defaults to all stages; the UI explicitly requests pending. Filters live in
+the URL, so refresh and browser Back preserve the view.
+
+Statuses describe recorded outcomes: arrange pickup, awaiting parcel, inspect parcel,
+refund approved, gift card issued, arrange replacement, shipment booked, rejected.
+A booking is not described as delivery, and a manual refund approval is not described
+as a completed transfer. Customer Past requests contains final review decisions;
+individual status descriptions explain remaining refund/shipping work. Active requests
+are those still in review, pickup, or parcel inspection. The underlying approval
+workflow and database status values are unchanged; no migration is needed for this UI.
+
+Customer requests use cards with outcome details and collapsible timelines. Admins
+see a table on desktop and cards on mobile, with review actions inside the details
+dialog alongside the evidence and addresses.
+
 ## September 2026 update: admin OTP, addresses, photos and emails
 
 Admin login requires an allowlisted email, the shared admin secret, then an email OTP.

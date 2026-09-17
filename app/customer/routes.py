@@ -11,6 +11,7 @@ from app.services.address_service import pickup_from_form
 from app.services.notification_service import queue_update, deliver_pending
 from app.utils.numbering import next_return_number, next_exchange_number
 from app.utils.tracking import build_timeline
+from app.utils.request_status import summary_for
 
 customer_bp = Blueprint("customer", __name__)
 
@@ -25,6 +26,8 @@ def _item_payload(item: OrderItem, window_days: int, eligible: bool):
         "image_url": item.image_url,
         "order_number": item.order.order_number,
         "eligible": eligible and active is None,
+        "fulfilled": item.order.fulfilled_at is not None,
+        "return_deadline": item.order.return_window_deadline(window_days).isoformat() if item.order.fulfilled_at else None,
         "pending": active is not None,
         "status": active.status.value if active else None,
     }
@@ -83,6 +86,7 @@ def my_requests():
 
     def r_payload(r):
         return {
+            **summary_for(r, "return"),
             "type": "return",
             "number": r.return_number,
             "item": r.order_item.product_title,
@@ -100,6 +104,7 @@ def my_requests():
 
     def e_payload(e):
         return {
+            **summary_for(e, "exchange"),
             "type": "exchange",
             "number": e.exchange_number,
             "item": e.order_item.product_title,

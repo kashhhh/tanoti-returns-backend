@@ -11,6 +11,9 @@ from app.utils.admin_auth import admin_required
 from app.services import shopify_client, shipping_service
 from app.services.notification_service import queue_update, deliver_pending
 
+from app.utils.request_status import stage_for
+from app.services.request_listing import list_page
+
 admin_bp = Blueprint("admin", __name__)
 
 
@@ -26,7 +29,7 @@ def _repeat_returner_flag(customer_id: int) -> bool:
     return (r_count + e_count) >= 3
 
 
-def _row(obj, kind: str) -> dict:
+def _row(obj, kind: str, repeat_flags=None) -> dict:
     row = {
         "type": kind,
         "number": obj.return_number if kind == "return" else obj.exchange_number,
@@ -36,6 +39,7 @@ def _row(obj, kind: str) -> dict:
         "size": obj.order_item.size,
         "order_number": obj.order_item.order.order_number,
         "status": obj.status.value,
+        "stage": stage_for(obj, kind),
         "rejected_stage": obj.rejected_stage,
         "rejection_reason": obj.rejection_reason.value if obj.rejection_reason else None,
         "rejection_note": obj.rejection_note,
@@ -45,7 +49,7 @@ def _row(obj, kind: str) -> dict:
         "pickup_address": obj.pickup_address or obj.order_item.order.shipping_address or {},
         "shipping_address": obj.order_item.order.shipping_address or {},
         "photo_urls": obj.photo_urls or [],
-        "repeat_returner": _repeat_returner_flag(obj.customer_id),
+        "repeat_returner": repeat_flags.get(obj.customer_id, False) if repeat_flags is not None else _repeat_returner_flag(obj.customer_id),
         "pickup_carrier": obj.pickup_carrier,
         "pickup_tracking_id": obj.pickup_tracking_id,
         "pickup_status": obj.pickup_status,
@@ -70,12 +74,11 @@ def _row(obj, kind: str) -> dict:
 @admin_bp.route("/requests", methods=["GET"])
 @admin_required
 def list_requests():
-    returns = ReturnRequest.query.order_by(ReturnRequest.created_at.desc()).all()
-    exchanges = ExchangeRequest.query.order_by(ExchangeRequest.created_at.desc()).all()
-
-    rows = [_row(r, "return") for r in returns] + [_row(e, "exchange") for e in exchanges]
-    rows.sort(key=lambda x: x["date"], reverse=True)
-    return jsonify({"requests": rows})
+    try:
+        objects, pagination, repeat_flags = list_page(request.args)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify({"requests": [_row(obj, kind, repeat_flags) for obj, kind in objects], **pagination})
 
 
 def _find_request(kind: str, number: str):
