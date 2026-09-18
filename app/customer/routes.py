@@ -12,22 +12,35 @@ from app.services.notification_service import queue_update, deliver_pending
 from app.utils.numbering import next_return_number, next_exchange_number
 from app.utils.tracking import build_timeline
 from app.utils.request_status import summary_for
+from app.services.shopify_returns import sync_one
 
 customer_bp = Blueprint("customer", __name__)
 
 
+def _customer_note(form):
+    note = (form.get("customer_note") or "").strip()
+    if len(note) > 2000:
+        raise ValueError("Customer notes must be 2,000 characters or fewer")
+    return note or None
+
+
 def _item_payload(item: OrderItem, window_days: int, eligible: bool):
     active = item.active_request()
+    deadline = item.request_deadline(window_days)
+    block = item.request_block_reason(window_days)
     return {
+        "unit_number": item.unit_number, "line_quantity": item.line_quantity,
+        "replacement_for": item.replacement_for, "unavailable_reason": block,
+        "has_request": bool(item.request_claimed or item.return_requests or item.exchange_requests),
         "id": item.id,
         "product_title": item.product_title,
         "size": item.size,
         "price": str(item.price),
         "image_url": item.image_url,
         "order_number": item.order.order_number,
-        "eligible": eligible and active is None,
-        "fulfilled": item.order.fulfilled_at is not None,
-        "return_deadline": item.order.return_window_deadline(window_days).isoformat() if item.order.fulfilled_at else None,
+        "eligible": block is None,
+        "fulfilled": deadline is not None,
+        "return_deadline": deadline.isoformat() if deadline else None,
         "pending": active is not None,
         "status": active.status.value if active else None,
     }
@@ -48,8 +61,10 @@ def list_orders():
     for order in orders:
         within_window = order.is_within_return_window(window_days)
         for item in order.items:
+            if item.superseded:
+                continue
             payload = _item_payload(item, window_days, within_window)
-            (eligible if within_window else expired).append(payload)
+            (eligible if payload["eligible"] else expired).append(payload)
 
     return jsonify({"eligible": eligible, "expired": expired})
 
@@ -68,7 +83,7 @@ def search_order():
 
     settings = AdminSettings.get()
     within_window = order.is_within_return_window(settings.return_window_days)
-    items = [_item_payload(i, settings.return_window_days, within_window) for i in order.items]
+    items = [_item_payload(i, settings.return_window_days, within_window) for i in order.items if not i.superseded]
     return jsonify({"order_number": order.order_number, "items": items})
 
 
@@ -99,6 +114,7 @@ def my_requests():
             "gift_card_code": r.gift_card_code,
             "rejection_reason": r.rejection_reason.value if r.rejection_reason else None,
             "rejection_note": r.rejection_note,
+            "customer_note": r.customer_note,
             "timeline": build_timeline(r, "return"),
         }
 
@@ -115,6 +131,7 @@ def my_requests():
             "created_at": e.created_at.isoformat(),
             "rejection_reason": e.rejection_reason.value if e.rejection_reason else None,
             "rejection_note": e.rejection_note,
+            "customer_note": e.customer_note,
             "timeline": build_timeline(e, "exchange"),
         }
 
@@ -136,12 +153,13 @@ def get_order_item(item_id):
 
     variants = []
     if item.shopify_product_id:
-        variants = shopify_client.get_variants_for_product(item.shopify_product_id)
+        variants = shopify_client.get_variants_for_product(item.shopify_product_id, item.shopify_variant_id)
     # Only in-stock sizes are selectable -- out-of-stock ones are blocked
     # from the exchange dropdown per the earlier decision.
-    available_sizes = [v["size"] for v in variants if v["in_stock"]]
+    available_sizes = sorted({v["size"] for v in variants if v["in_stock"] and v.get("size")})
 
     return jsonify({
+        **_item_payload(item, settings.return_window_days, True),
         "id": item.id,
         "product_title": item.product_title,
         "size": item.size,
@@ -166,14 +184,20 @@ def resync_my_orders():
     return jsonify({"message": "Orders synced"})
 
 
+def _claim_unit(item):
+    changed = OrderItem.query.filter_by(id=item.id, request_claimed=False).update({"request_claimed": True})
+    return changed == 1
+
+
 @customer_bp.route("/order-items/<int:item_id>/exchange", methods=["POST"])
 @login_required
 def submit_exchange(item_id):
     item = OrderItem.query.get_or_404(item_id)
     if item.order.customer_id != g.customer.id:
         return jsonify({"error": "Not found"}), 404
-    if item.active_request() is not None:
-        return jsonify({"error": "This item already has an active request"}), 400
+    block = item.request_block_reason(AdminSettings.get().return_window_days)
+    if block:
+        return jsonify({"error": block}), 400
 
     data = request.form
     size = data.get("size")
@@ -186,14 +210,25 @@ def submit_exchange(item_id):
         return jsonify({"error": "reason_other_text is required when reason is 'other'"}), 400
 
     try:
+        customer_note = _customer_note(request.form)
         pickup_address = pickup_from_form(request.form, item.order)
         photos = storage_service.required_photos(request.files)
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
+    try:
+        selected = shopify_client.select_exchange_variant(item, size)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception:
+        return jsonify({"error": "Could not check replacement stock. Please try again."}), 503
+    if not _claim_unit(item):
+        db.session.rollback()
+        return jsonify({"error": "A request has already been submitted for this unit"}), 409
     number = next_exchange_number()
     try:
         photo_urls = storage_service.save_request_photos(photos, number)
     except ValueError as exc:
+        db.session.rollback()
         return jsonify({"error": str(exc)}), 400
     exchange = ExchangeRequest(
         order_item=item,
@@ -204,12 +239,15 @@ def submit_exchange(item_id):
         order_item_id=item.id,
         customer_id=g.customer.id,
         requested_size=size,
+        requested_variant_id=selected["id"],
         reason=ExchangeReason(reason),
         reason_other_text=reason_other,
+        customer_note=customer_note,
     )
     db.session.add(exchange)
     queue_update(exchange, "exchange", "received")
     db.session.commit()
+    sync_one(exchange, "exchange")
     deliver_pending(limit=1)
     return jsonify({"exchange_number": exchange.exchange_number, "status": exchange.status.value}), 201
 
@@ -221,13 +259,15 @@ def submit_return(item_id):
     item = OrderItem.query.get_or_404(item_id)
     if item.order.customer_id != g.customer.id:
         return jsonify({"error": "Not found"}), 404
-    if item.active_request() is not None:
-        return jsonify({"error": "This item already has an active request"}), 400
+    block = item.request_block_reason(AdminSettings.get().return_window_days)
+    if block:
+        return jsonify({"error": block}), 400
 
     reason = request.form.get("reason")
     reason_other = request.form.get("reason_other_text")
     refund_mode = request.form.get("refund_mode")
     try:
+        customer_note = _customer_note(request.form)
         pickup_address = pickup_from_form(request.form, item.order)
         photos = storage_service.required_photos(request.files)
     except ValueError as exc:
@@ -245,11 +285,15 @@ def submit_return(item_id):
     if len(photos) < 2:
         return jsonify({"error": "At least 2 photos (front and back) are required"}), 400
 
+    if not _claim_unit(item):
+        db.session.rollback()
+        return jsonify({"error": "A request has already been submitted for this unit"}), 409
     return_number = next_return_number()
 
     try:
         photo_urls = storage_service.save_request_photos(photos, return_number)
     except ValueError as exc:
+        db.session.rollback()
         return jsonify({"error": str(exc)}), 400
 
     settings = AdminSettings.get()
@@ -266,6 +310,7 @@ def submit_return(item_id):
         customer_id=g.customer.id,
         reason=ReturnReason(reason),
         reason_other_text=reason_other,
+        customer_note=customer_note,
         photo_urls=photo_urls,
         refund_mode=RefundMode(refund_mode),
         refund_amount=item.price,
@@ -275,6 +320,7 @@ def submit_return(item_id):
     db.session.add(r)
     queue_update(r, "return", "received")
     db.session.commit()
+    sync_one(r, "return")
     deliver_pending(limit=1)
 
     return jsonify({

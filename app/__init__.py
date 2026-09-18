@@ -38,6 +38,19 @@ def create_app(config_class=Config):
     def uploaded_file(filename):
         return send_from_directory(app.config["PHOTOS_STORAGE_DIR"], filename)
 
+    @app.cli.command("sync-shopify-returns")
+    def sync_shopify_returns():
+        from app.services.shopify_returns import retry_pending
+        retry_pending()
+
+    @app.cli.command("backfill-replacements")
+    def backfill_replacements():
+        from app.models import ExchangeRequest
+        from app.services.replacement_service import ensure_replacement
+        for req in ExchangeRequest.query.filter(ExchangeRequest.delivered_at.isnot(None)).all():
+            ensure_replacement(req)
+        db.session.commit()
+
     @app.cli.command("retry-emails")
     def retry_emails():
         from app.services.notification_service import deliver_pending

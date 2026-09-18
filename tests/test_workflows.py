@@ -58,8 +58,11 @@ class WorkflowTests(unittest.TestCase):
         self.client = self.app.test_client()
         self.network = patch("requests.post", side_effect=AssertionError("Unexpected live network call"))
         self.network.start()
+        self.stock = patch("app.services.shopify_client.select_exchange_variant", return_value={"id":"200", "size":"M"})
+        self.stock.start()
 
     def tearDown(self):
+        self.stock.stop()
         self.network.stop()
         db.session.remove(); db.drop_all(); self.ctx.pop(); self.directory.cleanup()
 
@@ -73,6 +76,8 @@ class WorkflowTests(unittest.TestCase):
                                 data=data, headers=self.customer_headers)
 
     def action(self, number, action, kind="return", **data):
+        if action == "accept-parcel":
+            data.setdefault("restock", False)
         return self.client.post(f"/api/admin/requests/{kind}/{number}/{action}",
                                 json=data, headers=self.admin_headers)
 
@@ -337,8 +342,111 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(result["requests"][0]["stage"], stage)
             self.assertEqual(result["counts"]["all"], 37)
         customer = self.client.get("/api/customer/my-requests", headers=self.customer_headers).json["requests"]
-        self.assertTrue(next(r for r in customer if r["stage"] == "refund_approved")["is_past"])
+        self.assertFalse(next(r for r in customer if r["stage"] == "refund_approved")["is_past"])
         self.assertFalse(next(r for r in customer if r["stage"] == "awaiting_parcel")["is_past"])
+
+    def test_manual_outcomes_are_authorized_idempotent_and_move_to_history(self):
+        self.seed_listing()
+        ret = ReturnRequest.query.first()
+        exc = ExchangeRequest.query.first()
+        for obj in (ret, exc):
+            obj.status = RequestStatus.COMPLETED
+        db.session.commit()
+        for obj, kind, number, action, field, stage in (
+            (ret, "return", ret.return_number, "mark-refund-paid", "refund_paid_at", "refund_paid"),
+            (exc, "exchange", exc.exchange_number, "mark-delivered", "delivered_at", "delivered")):
+            url = f"/api/admin/requests/{kind}/{number}/{action}"
+            self.assertEqual(self.client.post(url, headers=self.customer_headers).status_code, 401)
+            first = self.action(number, action, kind=kind)
+            self.assertEqual(first.status_code, 200, first.json)
+            self.assertEqual(first.json["stage"], stage)
+            timestamp = first.json[field]
+            self.assertEqual(self.action(number, action, kind=kind).json[field], timestamp)
+            self.assertEqual(Notification.query.filter_by(event_key=number+":"+stage).count(), 1)
+            self.assertEqual(first.json[field.replace("_at", "_by")], "staff@example.com")
+        rows = self.client.get("/api/customer/my-requests", headers=self.customer_headers).json["requests"]
+        self.assertTrue(all(r["is_past"] for r in rows if r["number"] in (ret.return_number, exc.exchange_number)))
+
+    def test_cannot_confirm_unapproved_or_gift_card_refund(self):
+        self.seed_listing()
+        ret = ReturnRequest.query.first()
+        exc = ExchangeRequest.query.first()
+        self.assertEqual(self.action(ret.return_number, "mark-refund-paid").status_code, 400)
+        self.assertEqual(self.action(exc.exchange_number, "mark-delivered", kind="exchange").status_code, 400)
+        ret.status = RequestStatus.COMPLETED
+        ret.gift_card_code = "ISSUED"
+        db.session.commit()
+        self.assertEqual(self.action(ret.return_number, "mark-refund-paid").status_code, 400)
+
+    def test_analytics_counts_finances_and_drilldown(self):
+        self.seed_listing()
+        returns = ReturnRequest.query.order_by(ReturnRequest.id).all()
+        for ret in returns[:3]:
+            ret.status = RequestStatus.COMPLETED
+        returns[1].refund_paid_at = datetime.utcnow()
+        returns[2].gift_card_code = "ISSUED"
+        db.session.commit()
+        result = self.client.get("/api/admin/analytics/overview?from=2026-08-01&to=2026-08-31", headers=self.admin_headers)
+        self.assertEqual(result.status_code, 200, result.json)
+        data = result.json
+        self.assertEqual((data["total"], data["active"], data["successful"]), (37,35,2))
+        self.assertEqual(data["finance"], dict(approved_unpaid="999.00",paid="999.00",gift_cards="999.00"))
+        self.assertEqual(sum(r["count"] for r in data["trend"]), 37)
+        self.assertEqual(len(data["trend"]), 31)
+        product = data["products"][0]
+        rows = self.client.get("/api/admin/requests", query_string={"product_key":product["product_key"], "size":product["size"], "reason":product["reason"], "type":product["kind"]}, headers=self.admin_headers).json
+        self.assertEqual(rows["total"], product["count"])
+        filtered = self.client.get("/api/admin/analytics/overview?from=2026-08-01&to=2026-08-02&type=exchange", headers=self.admin_headers).json
+        self.assertEqual(filtered["total"], 2)
+        self.assertEqual(filtered["finance"]["paid"], "0.00")
+
+    def test_analytics_empty_invalid_and_previous_period(self):
+        self.seed_listing()
+        result = self.client.get("/api/admin/analytics/overview?from=2026-09-01&to=2026-09-30", headers=self.admin_headers).json
+        self.assertEqual(result["total"], 0)
+        self.assertEqual(result["previous_total"], 35)
+        self.assertEqual(result["oldest"], [])
+        for query in ("from=bad", "type=bad", "from=2020-01-01&to=2026-01-01", "from=2026-09-02&to=2026-09-01"):
+            self.assertEqual(self.client.get("/api/admin/analytics/overview?"+query, headers=self.admin_headers).status_code, 400)
+
+    def test_customer_notes_saved_and_visible_for_both_request_types(self):
+        for kind, model in (("return", ReturnRequest), ("exchange", ExchangeRequest)):
+            with self.subTest(kind=kind):
+                note = "Please inspect the seam.\n<script>alert('feedback')</script>"
+                response = self.submit(kind, customer_note="  " + note + "  ")
+                self.assertEqual(response.status_code, 201, response.json)
+                req = model.query.one()
+                self.assertEqual(req.customer_note, note)
+                number = response.json[kind+"_number"]
+                admin = self.client.get("/api/admin/requests", headers=self.admin_headers).json["requests"]
+                self.assertEqual(next(r for r in admin if r["number"] == number)["customer_note"], note)
+                customer = self.client.get("/api/customer/my-requests", headers=self.customer_headers).json["requests"]
+                self.assertEqual(next(r for r in customer if r["number"] == number)["customer_note"], note)
+                # A new physical unit is required; rejection no longer reopens the original.
+                original = db.session.get(OrderItem, self.item_id)
+                fresh = OrderItem(order_id=original.order_id, shopify_line_item_id="note-test-next", product_title=original.product_title, price=999, size="S")
+                db.session.add(fresh)
+                db.session.commit()
+                self.item_id = fresh.id
+
+    def test_customer_notes_optional_and_length_checked_before_upload(self):
+        for kind, model in (("return", ReturnRequest), ("exchange", ExchangeRequest)):
+            with self.subTest(kind=kind):
+                response = self.submit(kind, customer_note="x" * 2001)
+                self.assertEqual(response.status_code, 400)
+                self.assertIn("2,000", response.json["error"])
+                self.assertEqual(model.query.count(), 0)
+                self.assertEqual(list(Path(self.directory.name).rglob("*.jpg")), [])
+        response = self.submit(customer_note="   ")
+        self.assertEqual(response.status_code, 201)
+        self.assertIsNone(ReturnRequest.query.one().customer_note)
+
+    def test_customer_note_exact_limit_and_other_reason_are_independent(self):
+        response = self.submit(customer_note="x" * 2000, reason="other", reason_other_text="A different reason")
+        self.assertEqual(response.status_code, 201)
+        req = ReturnRequest.query.one()
+        self.assertEqual(req.customer_note, "x" * 2000)
+        self.assertEqual(req.reason_other_text, "A different reason")
 
     def test_admin_invalid_pagination_and_dates(self):
         for query in ("page=0", "page=no", "per_page=10000", "stage=invalid", "from=wrong", "from=2026-09-01&to=2026-08-01"):

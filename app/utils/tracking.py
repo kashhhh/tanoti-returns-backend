@@ -58,16 +58,22 @@ def build_timeline(obj, kind: str):
     if kind == "return":
         steps.append({
             "label": "Gift card issued" if obj.refund_mode == "gift_card" else "Refund approved",
-            "date": obj.completed_at.isoformat() if obj.completed_at else None,
+            "date": obj.parcel_decision_at.isoformat() if obj.parcel_decision_at else None,
             "done": obj.status == "completed",
         })
     else:
         steps.append({
-            "label": "Replacement shipment booked" if obj.outbound_tracking_id else "Replacement being arranged",
-            "date": obj.completed_at.isoformat() if obj.completed_at else None,
-            "done": bool(obj.outbound_tracking_id),
+            "label": "Replacement shipment" if obj.delivered_at else "Replacement shipment booked" if obj.outbound_tracking_id else "Replacement being arranged",
+            "date": obj.parcel_decision_at.isoformat() if obj.parcel_decision_at else None,
+            "done": bool(obj.outbound_tracking_id or obj.delivered_at),
             "tracking_id": obj.outbound_tracking_id,
             "tracking_url": shipping_service.tracking_url(obj.outbound_carrier, obj.outbound_tracking_id),
         })
 
+    if kind == "return" and obj.refund_mode == "account":
+        steps.append({"label": "Refund paid", "done": obj.refund_paid_at is not None,
+                      "date": obj.refund_paid_at.isoformat() if obj.refund_paid_at else None})
+    if kind == "exchange":
+        steps.append({"label": "Replacement delivered", "done": obj.delivered_at is not None,
+                      "date": obj.delivered_at.isoformat() if obj.delivered_at else None})
     return steps

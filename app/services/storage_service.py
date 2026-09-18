@@ -89,7 +89,7 @@ def _enforce_storage_quota():
         if obj.photo_urls:
             delete_photos_for_return(_number(obj))
             obj.photo_urls = []
-    db.session.commit()
+    db.session.flush()
     if _dir_size_mb(_photos_dir()) > budget:
         raise ValueError("Photo storage is full. Please contact the store or try again later.")
 

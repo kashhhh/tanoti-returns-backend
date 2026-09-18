@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, g
 
 from app.extensions import db
 from app.models import (
@@ -12,6 +12,7 @@ from app.services import shopify_client, shipping_service
 from app.services.notification_service import queue_update, deliver_pending
 
 from app.utils.request_status import stage_for
+from app.services.shopify_returns import sync_one
 from app.services.request_listing import list_page
 
 admin_bp = Blueprint("admin", __name__)
@@ -45,7 +46,14 @@ def _row(obj, kind: str, repeat_flags=None) -> dict:
         "rejection_note": obj.rejection_note,
         "reason": obj.reason.value,
         "reason_other_text": obj.reason_other_text,
+        "customer_note": obj.customer_note,
         "customer_email": obj.customer.email,
+        "replacement_for": obj.order_item.replacement_for,
+        "unit_number": obj.order_item.unit_number,
+        "shopify_sync_status": obj.shopify_sync_status,
+        "shopify_sync_error": obj.shopify_sync_error,
+        "shopify_return_id": obj.shopify_return_id,
+        "restock": obj.restock,
         "pickup_address": obj.pickup_address or obj.order_item.order.shipping_address or {},
         "shipping_address": obj.order_item.order.shipping_address or {},
         "photo_urls": obj.photo_urls or [],
@@ -62,8 +70,12 @@ def _row(obj, kind: str, repeat_flags=None) -> dict:
         row["refund_mode"] = obj.refund_mode.value
         row["net_refund_amount"] = str(obj.net_refund_amount)
         row["gift_card_code"] = obj.gift_card_code
+        row["refund_paid_at"] = obj.refund_paid_at.isoformat() if obj.refund_paid_at else None
+        row["refund_paid_by"] = obj.refund_paid_by
     else:
         row["requested_size"] = obj.requested_size
+        row["delivered_at"] = obj.delivered_at.isoformat() if obj.delivered_at else None
+        row["delivered_by"] = obj.delivered_by
         row["outbound_carrier"] = obj.outbound_carrier
         row["outbound_tracking_id"] = obj.outbound_tracking_id
         row["outbound_status"] = obj.outbound_status
@@ -83,8 +95,10 @@ def list_requests():
 
 def _find_request(kind: str, number: str):
     if kind == "return":
-        return ReturnRequest.query.filter_by(return_number=number).first()
-    return ExchangeRequest.query.filter_by(exchange_number=number).first()
+        return ReturnRequest.query.filter_by(return_number=number).with_for_update().first()
+    if kind == "exchange":
+        return ExchangeRequest.query.filter_by(exchange_number=number).with_for_update().first()
+    return None
 
 
 def _require_status(req, expected: RequestStatus):
@@ -120,6 +134,7 @@ def accept_photos(kind, number):
     req.status = RequestStatus.PICKUP_SCHEDULED
     queue_update(req, kind, "pickup_booked" if req.pickup_tracking_id else "pickup_pending")
     db.session.commit()
+    sync_one(req, kind)
     deliver_pending(limit=1)
     return jsonify(_row(req, kind))
 
@@ -150,6 +165,7 @@ def mark_parcel_received(kind, number):
     req.status = RequestStatus.PARCEL_RECEIVED
     queue_update(req, kind, "parcel_received")
     db.session.commit()
+    sync_one(req, kind)
     deliver_pending(limit=1)
     return jsonify(_row(req, kind))
 
@@ -164,6 +180,20 @@ def accept_parcel(kind, number):
     if err:
         return err
 
+    choice = (request.get_json(silent=True) or {}).get("restock")
+    if not isinstance(choice, bool):
+        return jsonify({"error": "Choose whether the inspected item should be restocked"}), 400
+    req.restock = choice
+    if kind == "exchange":
+        try:
+            variant = shopify_client.select_exchange_variant(req.order_item, req.requested_size)
+            if req.requested_variant_id and variant["id"] != req.requested_variant_id:
+                return jsonify({"error": "Replacement variant changed; review the request"}), 409
+            req.requested_variant_id = variant["id"]
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        except Exception:
+            return jsonify({"error": "Could not verify replacement stock. Please retry."}), 503
     req.parcel_decision_at = datetime.utcnow()
 
     if kind == "return":
@@ -179,7 +209,7 @@ def accept_parcel(kind, number):
                 db.session.commit()
                 return jsonify({"error": f"Parcel accepted, but gift card issuance failed: {e}"}), 502
         req.status = RequestStatus.COMPLETED
-        req.completed_at = datetime.utcnow()
+        req.completed_at = datetime.utcnow() if req.refund_mode == RefundMode.GIFT_CARD else None
 
     else:  # exchange: ship the replacement item
         try:
@@ -196,7 +226,7 @@ def accept_parcel(kind, number):
             req.outbound_carrier = "manual"
             req.outbound_status = "manual_scheduling_required"
         req.status = RequestStatus.COMPLETED
-        req.completed_at = datetime.utcnow()
+        req.completed_at = None
 
     if kind == "return":
         event = "gift_card" if req.refund_mode == RefundMode.GIFT_CARD else "refund_approved"
@@ -204,6 +234,7 @@ def accept_parcel(kind, number):
         event = "replacement_booked" if req.outbound_tracking_id else "replacement_pending"
     queue_update(req, kind, event)
     db.session.commit()
+    sync_one(req, kind)
     deliver_pending(limit=1)
     return jsonify(_row(req, kind))
 
@@ -237,52 +268,80 @@ def _reject(req, kind, number, stage: str):
         req.parcel_decision_at = datetime.utcnow()
     queue_update(req, kind, "rejected")
     db.session.commit()
+    sync_one(req, kind)
     deliver_pending(limit=1)
     return jsonify(_row(req, kind))
 
 
-@admin_bp.route("/analytics/overview", methods=["GET"])
+@admin_bp.post("/requests/return/<number>/mark-refund-paid")
+@admin_required
+def mark_refund_paid(number):
+    req = ReturnRequest.query.filter_by(return_number=number).with_for_update().first()
+    if not req:
+        return jsonify({"error": "Request not found"}), 404
+    if req.status != RequestStatus.COMPLETED or req.refund_mode != RefundMode.ACCOUNT or req.gift_card_code:
+        return jsonify({"error": "Only an approved manual refund can be marked paid"}), 400
+    if req.refund_paid_at:
+        return jsonify(_row(req, "return"))
+    req.refund_paid_at = datetime.utcnow()
+    req.refund_paid_by = g.admin_email
+    req.completed_at = req.refund_paid_at
+    queue_update(req, "return", "refund_paid")
+    db.session.commit()
+    sync_one(req, "return")
+    deliver_pending(limit=1)
+    return jsonify(_row(req, "return"))
+
+
+@admin_bp.post("/requests/exchange/<number>/mark-delivered")
+@admin_required
+def mark_delivered(number):
+    req = ExchangeRequest.query.filter_by(exchange_number=number).with_for_update().first()
+    if not req:
+        return jsonify({"error": "Request not found"}), 404
+    if req.status != RequestStatus.COMPLETED:
+        return jsonify({"error": "Only an approved exchange can be marked delivered"}), 400
+    if req.delivered_at:
+        return jsonify(_row(req, "exchange"))
+    # A manual shipment can be confirmed delivered even without an API waybill.
+    req.delivered_at = datetime.utcnow()
+    req.delivered_by = g.admin_email
+    req.completed_at = req.delivered_at
+    req.outbound_status = "delivered"
+    from app.services.replacement_service import ensure_replacement
+    ensure_replacement(req)
+    queue_update(req, "exchange", "delivered")
+    db.session.commit()
+    sync_one(req, "exchange")
+    deliver_pending(limit=1)
+    return jsonify(_row(req, "exchange"))
+
+
+@admin_bp.post("/requests/<kind>/<number>/sync-shopify")
+@admin_required
+def sync_shopify(kind, number):
+    req = _find_request(kind, number)
+    if not req:
+        return jsonify({"error": "Not found"}), 404
+    # Optional restock decision lets legacy approved records be processed safely.
+    data = request.get_json(silent=True) or {}
+    if "restock" in data and req.restock is None:
+        if not isinstance(data["restock"], bool):
+            return jsonify({"error": "Restock must be true or false"}), 400
+        req.restock = data["restock"]
+    db.session.commit()
+    sync_one(req, kind)
+    return jsonify(_row(req, kind))
+
+
+@admin_bp.get("/analytics/overview")
 @admin_required
 def analytics_overview():
-    from sqlalchemy import func
-    from app.models import OrderItem
-
-    top_returned_products = (
-        db.session.query(
-            OrderItem.product_title, func.count(ReturnRequest.id).label("count")
-        )
-        .join(ReturnRequest, ReturnRequest.order_item_id == OrderItem.id)
-        .group_by(OrderItem.product_title)
-        .order_by(func.count(ReturnRequest.id).desc())
-        .limit(10)
-        .all()
-    )
-
-    reason_breakdown = (
-        db.session.query(ReturnRequest.reason, func.count(ReturnRequest.id))
-        .group_by(ReturnRequest.reason)
-        .all()
-    )
-
-    returns_by_size = (
-        db.session.query(OrderItem.size, func.count(ReturnRequest.id))
-        .join(ReturnRequest, ReturnRequest.order_item_id == OrderItem.id)
-        .group_by(OrderItem.size)
-        .all()
-    )
-
-    exchange_reason_breakdown = (
-        db.session.query(ExchangeRequest.reason, func.count(ExchangeRequest.id))
-        .group_by(ExchangeRequest.reason)
-        .all()
-    )
-
-    return jsonify({
-        "top_returned_products": [{"product": p, "count": c} for p, c in top_returned_products],
-        "return_reason_breakdown": [{"reason": r.value, "count": c} for r, c in reason_breakdown],
-        "returns_by_size": [{"size": s, "count": c} for s, c in returns_by_size],
-        "exchange_reason_breakdown": [{"reason": r.value, "count": c} for r, c in exchange_reason_breakdown],
-    })
+    from app.services.analytics_service import overview
+    try:
+        return jsonify(overview(request.args))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
 
 
 @admin_bp.route("/settings", methods=["GET"])

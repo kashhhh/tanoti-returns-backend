@@ -127,21 +127,21 @@ def get_product_image_url(shopify_product_id: str):
     image = (resp.json().get("product") or {}).get("image") or {}
     return image.get("src")
 
-def get_variants_for_product(shopify_product_id: str):
-    """Live stock check used by get_order_item() to decide which sizes
-    are selectable in the exchange dropdown -- out-of-stock sizes get
-    excluded per the 'block the option in the dropdown' decision."""
-    resp = requests.get(
-        f"{_base_url()}/products/{shopify_product_id}/variants.json",
-        headers=_headers(),
-        timeout=10,
-    )
+def get_variants_for_product(shopify_product_id: str, original_variant_id=None):
+    """Read the named size option and preserve colour/other options for exchanges."""
+    resp = requests.get(f"{_base_url()}/products/{shopify_product_id}.json", headers=_headers(), timeout=10)
     resp.raise_for_status()
-    variants = resp.json().get("variants", [])
-    return [
-        {"size": v.get("option1"), "in_stock": (v.get("inventory_quantity") or 0) > 0}
-        for v in variants
-    ]
+    product = resp.json()["product"]
+    position = next((int(o["position"]) for o in product.get("options", []) if o["name"].lower() == "size"), None)
+    if not position:
+        return []
+    variants = product.get("variants", [])
+    original = next((v for v in variants if str(v["id"]) == str(original_variant_id)), None)
+    if original_variant_id and original is None:
+        return []
+    return [{"id":str(v["id"]), "size":v.get(f"option{position}"),
+             "in_stock":(v.get("inventory_quantity") or 0) > 0}
+            for v in variants if original is None or all(v.get(f"option{i}") == original.get(f"option{i}") for i in (1,2,3) if i != position)]
 
 
 def issue_gift_card(amount: str, note: str = ""):
@@ -163,3 +163,36 @@ def issue_gift_card(amount: str, note: str = ""):
     )
     resp.raise_for_status()
     return resp.json()["gift_card"]
+
+
+def select_exchange_variant(item, size):
+    """Resolve exact size while preserving the original variant's other options."""
+    if not item.shopify_product_id or not item.shopify_variant_id:
+        raise ValueError("This item's Shopify variant is unavailable. Please contact the store.")
+    matches = [v for v in get_variants_for_product(item.shopify_product_id, item.shopify_variant_id) if v["size"] == size]
+    if len(matches) != 1 or not matches[0]["in_stock"]:
+        raise ValueError("The selected replacement is no longer in stock. Please choose another size.")
+    return matches[0]
+
+
+class ShopifyUserError(ValueError):
+    """Shopify explicitly rejected a mutation without performing it."""
+
+
+def graphql(query, variables):
+    response = requests.post(f"{_base_url()}/graphql.json", headers=_headers(),
+                             json={"query": query, "variables": variables}, timeout=20)
+    response.raise_for_status()
+    result = response.json()
+    if result.get("errors"):
+        raise RuntimeError("Shopify GraphQL: " + "; ".join(e.get("message", "Unknown error") for e in result["errors"]))
+    if not result.get("data"):
+        raise RuntimeError("Shopify returned no data")
+    return result["data"]
+
+
+def mutation(query, variables, field):
+    result = graphql(query, variables)[field]
+    if result.get("userErrors"):
+        raise ShopifyUserError("; ".join(e["message"] for e in result["userErrors"]))
+    return result

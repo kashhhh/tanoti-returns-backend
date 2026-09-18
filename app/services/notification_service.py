@@ -9,11 +9,14 @@ from app.services.shipping_service import tracking_url
 
 
 def queue_update(obj, kind, event):
+    obj.shopify_sync_status = "pending"
     number = obj.return_number if kind == "return" else obj.exchange_number
     key = f"{number}:{event}"
     if Notification.query.filter_by(event_key=key).first():
         return
     text = {
+        "refund_paid": ("Refund paid", "Your refund has been marked paid by our team."),
+        "delivered": ("Replacement delivered", "Your replacement has been marked delivered. Your exchange is now complete."),
         "received": ("Request received", "We have received your request and will review your photos."),
         "pickup_pending": ("Request approved", "Your photos have been approved. We are arranging your pickup."),
         "pickup_booked": ("Pickup scheduled", "Your photos have been approved and your reverse pickup is scheduled."),
@@ -31,7 +34,7 @@ def queue_update(obj, kind, event):
         html += f"<p>Rejected at {stage}. Reason: {escape(obj.rejection_reason.value.replace('_', ' '))}</p>"
         if obj.rejection_note:
             html += f"<p>{escape(obj.rejection_note)}</p>"
-    if event in ("gift_card", "refund_approved"):
+    if event in ("gift_card", "refund_approved", "refund_paid"):
         html += f"<p>Refund amount: INR {escape(str(obj.net_refund_amount))}</p>"
     if event == "gift_card":
         html += f"<p>Gift card code: <strong>{escape(obj.gift_card_code)}</strong></p>"

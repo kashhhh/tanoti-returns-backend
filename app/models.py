@@ -33,7 +33,7 @@ class RequestStatus(str, Enum):
     PENDING = "pending"                    # awaiting photo review
     PICKUP_SCHEDULED = "pickup_scheduled"  # photos accepted; reverse pickup booked, awaiting parcel
     PARCEL_RECEIVED = "parcel_received"    # parcel arrived at the warehouse; awaiting physical inspection
-    COMPLETED = "completed"                # parcel accepted -- refund/gift card issued, or new item shipped
+    COMPLETED = "completed"                # legacy: parcel approved; outcome timestamps confirm final success
     REJECTED = "rejected"                  # rejected at either the photo or parcel stage (see rejected_stage)
 
 
@@ -129,7 +129,16 @@ class OrderItem(db.Model):
     product_title = db.Column(db.String(255), nullable=False)
     size = db.Column(db.String(32))
     sku = db.Column(db.String(64))
-    quantity = db.Column(db.Integer, default=1)
+    quantity = db.Column(db.Integer, default=1)  # physical units per card: always one after migration
+    unit_number = db.Column(db.Integer, nullable=False, default=1)
+    line_quantity = db.Column(db.Integer, nullable=False, default=1)
+    fulfilled_at = db.Column(db.DateTime, nullable=True)
+    fulfillment_known = db.Column(db.Boolean, nullable=False, default=False)
+    superseded = db.Column(db.Boolean, nullable=False, default=False)
+    unavailable = db.Column(db.Boolean, nullable=False, default=False)
+    request_claimed = db.Column(db.Boolean, nullable=False, default=False)
+    replacement_for = db.Column(db.String(20), nullable=True, unique=True)
+    shopify_fulfillment_line_id = db.Column(db.String(100), nullable=True)
     price = db.Column(db.Numeric(10, 2), nullable=False)
     image_url = db.Column(db.String(512))
 
@@ -137,16 +146,33 @@ class OrderItem(db.Model):
     return_requests = db.relationship("ReturnRequest", back_populates="order_item")
     exchange_requests = db.relationship("ExchangeRequest", back_populates="order_item")
 
+    def request_deadline(self, days):
+        from datetime import timedelta
+        start = self.fulfilled_at if self.fulfillment_known else self.order.fulfilled_at
+        return start + timedelta(days=days) if start else None
+
+    def request_block_reason(self, days):
+        if self.request_claimed or self.return_requests or self.exchange_requests:
+            return "A request has already been submitted for this unit. See your request history."
+        if self.unavailable or self.superseded:
+            return "This unit is no longer available for return or exchange."
+        deadline = self.request_deadline(days)
+        if not deadline:
+            return "This unit has not been fulfilled yet."
+        if datetime.utcnow() > deadline:
+            return "The return window for this unit has ended."
+        return None
+
     def active_request(self):
         """Returns the current non-terminal request (return or exchange) on
         this item, if any -- used to decide whether the item still shows as
         eligible / clickable, or as 'pending'."""
         NON_TERMINAL = (RequestStatus.PENDING, RequestStatus.PICKUP_SCHEDULED, RequestStatus.PARCEL_RECEIVED)
         for r in self.return_requests:
-            if r.status in NON_TERMINAL:
+            if r.status in NON_TERMINAL or (r.status == RequestStatus.COMPLETED and not r.gift_card_code and not r.refund_paid_at):
                 return r
         for e in self.exchange_requests:
-            if e.status in NON_TERMINAL:
+            if e.status in NON_TERMINAL or (e.status == RequestStatus.COMPLETED and not e.delivered_at):
                 return e
         return None
 
@@ -166,6 +192,14 @@ class ReturnRequest(db.Model):
 
     reason = db.Column(db.Enum(ReturnReason), nullable=False)
     reason_other_text = db.Column(db.Text, nullable=True)
+    customer_note = db.Column(db.Text, nullable=True)
+    restock = db.Column(db.Boolean, nullable=True)
+    shopify_location_id = db.Column(db.String(100), nullable=True)
+    shopify_return_id = db.Column(db.String(100), nullable=True)
+    shopify_sync_status = db.Column(db.String(32), nullable=False, default="pending")
+    shopify_sync_error = db.Column(db.Text, nullable=True)
+    shopify_sync_stage = db.Column(db.String(32), nullable=True)
+    shopify_create_attempted = db.Column(db.Boolean, nullable=False, default=False)
     photo_urls = db.Column(db.JSON, default=list)   # min 2 (front/back)
     pickup_address = db.Column(db.JSON, nullable=True)
 
@@ -174,6 +208,8 @@ class ReturnRequest(db.Model):
     deduction_applied = db.Column(db.Numeric(10, 2), default=0)        # from global toggle, snapshotted at submit time
     net_refund_amount = db.Column(db.Numeric(10, 2), nullable=False)   # refund_amount - deduction_applied
 
+    refund_paid_at = db.Column(db.DateTime, nullable=True)
+    refund_paid_by = db.Column(db.String(255), nullable=True)
     gift_card_code = db.Column(db.String(64), nullable=True)           # set once issued
 
     status = db.Column(db.Enum(RequestStatus), default=RequestStatus.PENDING, nullable=False)
@@ -206,10 +242,20 @@ class ExchangeRequest(db.Model):
     customer_id = db.Column(db.Integer, db.ForeignKey("customers.id"), nullable=False)
 
     requested_size = db.Column(db.String(32), nullable=False)
+    requested_variant_id = db.Column(db.String(64), nullable=True)
+    replacement_line_id = db.Column(db.String(64), nullable=True)
     photo_urls = db.Column(db.JSON, default=list)
     pickup_address = db.Column(db.JSON, nullable=True)
     reason = db.Column(db.Enum(ExchangeReason), nullable=False)
     reason_other_text = db.Column(db.Text, nullable=True)
+    customer_note = db.Column(db.Text, nullable=True)
+    restock = db.Column(db.Boolean, nullable=True)
+    shopify_location_id = db.Column(db.String(100), nullable=True)
+    shopify_return_id = db.Column(db.String(100), nullable=True)
+    shopify_sync_status = db.Column(db.String(32), nullable=False, default="pending")
+    shopify_sync_error = db.Column(db.Text, nullable=True)
+    shopify_sync_stage = db.Column(db.String(32), nullable=True)
+    shopify_create_attempted = db.Column(db.Boolean, nullable=False, default=False)
 
     status = db.Column(db.Enum(RequestStatus), default=RequestStatus.PENDING, nullable=False)
     rejected_stage = db.Column(db.String(16), nullable=True)
@@ -226,6 +272,8 @@ class ExchangeRequest(db.Model):
     outbound_carrier = db.Column(db.String(32), nullable=True)
     outbound_tracking_id = db.Column(db.String(64), nullable=True)
     outbound_status = db.Column(db.String(32), nullable=True)
+    delivered_at = db.Column(db.DateTime, nullable=True)
+    delivered_by = db.Column(db.String(255), nullable=True)
 
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     photo_decision_at = db.Column(db.DateTime, nullable=True)

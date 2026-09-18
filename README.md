@@ -285,3 +285,26 @@ curl -X POST http://localhost:5000/api/admin/requests/return/RET-000001/accept \
 `TESTING_MODE=true` logs emails locally. Shopify calls always use your real store;
 use a real customer email with orders. Gift card issuance and shipping remain live.
 See the current setup instructions at the top of this file for admin OTP login.
+
+
+### Confirmed outcomes and analytics
+
+Apply the schema upgrade before running this version (from `backend`, with the virtual environment active):
+
+```powershell
+python -m flask --app run db upgrade
+```
+
+Manual refunds remain active until an admin selects **Mark refund paid** after making the payment. Approved exchanges remain active until **Mark delivered** is selected after confirming delivery. These actions record an admin email and UTC timestamp and queue a customer email; they do not transfer funds or fetch delivery confirmation. Gift card issuance and rejection move requests to history immediately. Existing approvals are not automatically treated as paid or delivered.
+
+Analytics uses requests submitted in the selected inclusive UTC date range (up to 366 days), with current outcomes and an equal-length previous period for submission counts. Financial totals use net refund values and distinguish approved unpaid refunds, confirmed payments, and issued gift cards. Product/size/reason combinations and size exchange patterns count requests, including rejected requests, not store-wide return rates. Longest waits use the latest recorded process timestamp. Clicking reason, product, stage or financial summaries opens filtered requests.
+
+
+### Optional customer notes
+
+Returns and exchanges accept an optional `customer_note` field (maximum 2,000 characters, trimmed, blank stored as null). Notes are shown as plain text in customer history and admin details. Apply migration `d291c04fa832` with `python -m flask --app run db upgrade` before starting this version. See `PRODUCTION_REVIEW.md` for unresolved launch blockers; delivery and Resend setup remain deferred.
+
+
+### Individual units, replacement returns and Shopify sync
+
+See `SHOPIFY_SYNC_SETUP.md` for the unit-splitting migration, delivered replacement backfill, Shopify scopes, retry command and financial-reconciliation limitations. `.env` was not changed.

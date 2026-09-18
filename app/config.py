@@ -26,7 +26,7 @@ class Config:
     SHOPIFY_STORE_DOMAIN = os.environ.get("SHOPIFY_STORE_DOMAIN")     # e.g. tanoti-official.myshopify.com
     SHOPIFY_CLIENT_ID = os.environ.get("SHOPIFY_CLIENT_ID")
     SHOPIFY_CLIENT_SECRET = os.environ.get("SHOPIFY_CLIENT_SECRET")
-    SHOPIFY_API_VERSION = os.environ.get("SHOPIFY_API_VERSION", "2026-10")
+    SHOPIFY_API_VERSION = os.environ.get("SHOPIFY_API_VERSION", "2026-07")
     SHOPIFY_WEBHOOK_SECRET = os.environ.get("SHOPIFY_WEBHOOK_SECRET")
 
     # Resend (email)
