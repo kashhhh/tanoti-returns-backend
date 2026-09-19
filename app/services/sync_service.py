@@ -4,6 +4,9 @@ Customer / Order / OrderItem rows. Idempotent: re-running with the same
 order just updates the existing rows rather than duplicating them.
 """
 from datetime import datetime, timezone
+import hashlib
+
+from sqlalchemy import text
 
 from app.extensions import db
 from app.models import Customer, Order, OrderItem, PaymentMethod, ExchangeRequest, RequestStatus
@@ -23,14 +26,48 @@ def _parse_payment_method(shopify_order: dict) -> PaymentMethod:
     return PaymentMethod.PREPAID
 
 
+def _customer_lock_key(value: str) -> int:
+    """Return a stable signed bigint suitable for a Postgres advisory lock."""
+    digest = hashlib.sha256(value.encode("utf-8")).digest()[:8]
+    return int.from_bytes(digest, byteorder="big", signed=True)
+
+
+def _lock_customer_identity(shopify_customer_id: str, email: str) -> None:
+    """Serialize first-time customer creation across Gunicorn threads.
+
+    Customer identity has two unique keys. Lock both, in a stable order, so
+    concurrent order webhooks cannot both observe a missing row and attempt
+    to insert it. SQLite is used by the isolated test suite and processes its
+    writes serially, so the Postgres-specific lock is deliberately skipped.
+    """
+    if db.session.get_bind().dialect.name != "postgresql":
+        return
+
+    keys = {
+        _customer_lock_key(f"shopify-customer-id:{shopify_customer_id}"),
+        _customer_lock_key(f"shopify-customer-email:{email}"),
+    }
+    for key in sorted(keys):
+        db.session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": key})
+
+
 def upsert_customer(shopify_customer: dict) -> Customer:
     email = (shopify_customer.get("email") or "").strip().lower()
-    customer = Customer.query.filter_by(email=email).first()
+    shopify_customer_id = str(shopify_customer["id"])
+    _lock_customer_identity(shopify_customer_id, email)
+
+    customer_by_id = Customer.query.filter_by(shopify_customer_id=shopify_customer_id).first()
+    customer_by_email = Customer.query.filter_by(email=email).first()
+    if customer_by_id and customer_by_email and customer_by_id.id != customer_by_email.id:
+        raise ValueError("Shopify customer ID and email belong to different customer records")
+
+    customer = customer_by_id or customer_by_email
     if not customer:
-        customer = Customer(email=email)
+        customer = Customer(email=email, shopify_customer_id=shopify_customer_id)
         db.session.add(customer)
 
-    customer.shopify_customer_id = str(shopify_customer["id"])
+    customer.email = email
+    customer.shopify_customer_id = shopify_customer_id
     customer.name = f"{shopify_customer.get('first_name', '')} {shopify_customer.get('last_name', '')}".strip()
     db.session.flush()  # get customer.id without a full commit
     return customer

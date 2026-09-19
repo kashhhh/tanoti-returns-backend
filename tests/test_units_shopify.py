@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 from unittest.mock import patch
 import test_workflows as fixtures
 from app.extensions import db
-from app.models import OrderItem, ReturnRequest, ExchangeRequest, RequestStatus
+from app.models import Customer, OrderItem, ReturnRequest, ExchangeRequest, RequestStatus
 from app.services import shopify_returns as remote
 from app.services.sync_service import upsert_order
 
@@ -78,6 +78,21 @@ class UnitAndShopifyTests(unittest.TestCase):
         self.item_id = ids[1]
         self.assertEqual(self.submit("exchange").status_code,201)
         self.assertEqual([i.unit_number for i in OrderItem.query.order_by(OrderItem.id)],[1,2])
+
+    def test_customer_sync_reconciles_shopify_id_and_normalized_email(self):
+        payload={"id":100,"order_number":100,"customer":{"id":2,"email":" CUSTOMER@example.com "},
+            "fulfillments":[],"line_items":[]}
+        upsert_order(payload)
+        customers=Customer.query.filter_by(email="customer@example.com").all()
+        self.assertEqual(len(customers),1)
+        self.assertEqual(customers[0].shopify_customer_id,"2")
+
+        payload["id"]=101
+        payload["order_number"]=101
+        payload["customer"]={"id":2,"email":"new@example.com"}
+        upsert_order(payload)
+        self.assertEqual(Customer.query.count(),1)
+        self.assertEqual(Customer.query.one().email,"new@example.com")
 
     def test_unfulfilled_second_unit_does_not_inherit_first_unit_date(self):
         upsert_order({"id":100,"order_number":100,"customer":{"id":1,"email":"customer@example.com"},
