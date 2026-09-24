@@ -9,13 +9,18 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 class Config:
-    SECRET_KEY = os.environ.get("SECRET_KEY", "change-me-in-prod")
+    SECRET_KEY = os.environ.get("SECRET_KEY", "")
+    APP_ENV = os.environ.get("APP_ENV", "production")
+    RATE_LIMIT_ENABLED = True
+    TRUST_PROXY = os.environ.get("TRUST_PROXY", "false").lower() == "true"
     ADMIN_API_KEY = os.environ.get("ADMIN_API_KEY", "change-me-in-prod")
     ADMIN_SECRET_KEY = os.environ.get("ADMIN_SECRET_KEY") or os.environ.get("ADMIN_API_KEY", "")
     ADMIN_EMAILS = ADMIN_EMAILS
     ADMIN_SESSION_HOURS = 8
     TESTING_MODE = os.environ.get("TESTING_MODE", "false").lower() == "true"
     MAX_CONTENT_LENGTH = 22 * 1024 * 1024
+    MAX_FORM_MEMORY_SIZE = 64 * 1024
+    MAX_FORM_PARTS = 20
     CORS_ORIGINS = os.environ.get("CORS_ORIGINS", "http://localhost:5173")
     SQLALCHEMY_DATABASE_URI = os.environ.get(
         "DATABASE_URL", "postgresql://localhost/tanoti_returns_v2"
@@ -53,4 +58,4 @@ class Config:
     OTP_MAX_VERIFY_ATTEMPTS = 5
 
     # Auth session (JWT)
-    JWT_EXPIRY_HOURS = 24 * 7  # customers stay logged in a week
+    JWT_EXPIRY_HOURS = 8

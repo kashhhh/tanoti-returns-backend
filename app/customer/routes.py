@@ -180,6 +180,10 @@ def resync_my_orders():
     """Manual 'refresh my orders' action -- pulls the customer's full
     order history from Shopify again. Useful right after a first login,
     or if a webhook was missed."""
+    from app.security import limited
+    blocked = limited("customer-resync", str(g.customer.id), 2, 300)
+    if blocked is not None:
+        return blocked
     sync_service.sync_orders_for_customer(g.customer.shopify_customer_id)
     return jsonify({"message": "Orders synced"})
 

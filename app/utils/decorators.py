@@ -9,6 +9,10 @@ from app.models import Customer
 
 def issue_token(customer: Customer) -> str:
     payload = {
+        "sub": str(customer.id),
+        "role": "customer",
+        "aud": "tanoti-customer",
+        "iat": datetime.utcnow(),
         "customer_id": customer.id,
         "email": customer.email,
         "exp": datetime.utcnow() + timedelta(hours=current_app.config["JWT_EXPIRY_HOURS"]),
@@ -27,13 +31,15 @@ def login_required(fn):
             return jsonify({"error": "Missing or invalid Authorization header"}), 401
         token = auth_header.split(" ", 1)[1]
         try:
-            payload = jwt.decode(token, current_app.config["SECRET_KEY"], algorithms=["HS256"])
+            payload = jwt.decode(token, current_app.config["SECRET_KEY"], algorithms=["HS256"],
+                                 audience="tanoti-customer",
+                                 options={"require": ["exp", "iat", "sub", "role", "aud", "customer_id"]})
         except jwt.ExpiredSignatureError:
             return jsonify({"error": "Session expired, please log in again"}), 401
         except jwt.InvalidTokenError:
             return jsonify({"error": "Invalid session"}), 401
 
-        if payload.get("role") == "admin" or not payload.get("customer_id"):
+        if payload.get("role") != "customer" or type(payload.get("customer_id")) is not int or payload["sub"] != str(payload["customer_id"]):
             return jsonify({"error": "Invalid customer session"}), 401
         customer = Customer.query.get(payload["customer_id"])
         if not customer:

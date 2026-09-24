@@ -11,6 +11,7 @@ class MigrationTest(unittest.TestCase):
     def test_upgrade_preserves_existing_data(self):
         with tempfile.TemporaryDirectory() as folder:
             class TestConfig(Config):
+                TESTING = True
                 SQLALCHEMY_DATABASE_URI = "sqlite:///" + (Path(folder)/"migration.db").as_posix()
             app = create_app(TestConfig)
             with app.app_context():
@@ -35,6 +36,7 @@ class MigrationTest(unittest.TestCase):
                     self.assertEqual(tuple(units[1])[1:],(2,1,2,False))
                     self.assertEqual(db.session.execute(text("SELECT order_item_id FROM return_requests WHERE return_number='RET-OLD'")).scalar(),1)
                     self.assertIn("notifications", inspect(db.engine).get_table_names())
+                    self.assertIn("security_rate_limits", inspect(db.engine).get_table_names())
                 finally:
                     db.session.remove()
                     db.engine.dispose()

@@ -279,8 +279,8 @@ class WorkflowTests(unittest.TestCase):
         from app.services.shopify_client import find_customer_by_email
         self.app.config["TESTING_MODE"] = True
         with patch("app.services.shopify_client._headers", return_value={}), patch("requests.get") as get:
-            get.return_value.json.return_value = {"customers": [{"id": 42}]}
-            self.assertEqual(find_customer_by_email("customer@example.com"), {"id": 42})
+            get.return_value.json.return_value = {"customers": [{"id": 42, "email": "customer@example.com"}]}
+            self.assertEqual(find_customer_by_email("customer@example.com"), {"id": 42, "email": "customer@example.com"})
             get.assert_called_once()
 
     def seed_listing(self):

@@ -1,4 +1,4 @@
-from flask import Flask, send_from_directory
+from flask import Flask, send_from_directory, abort
 from flask_cors import CORS
 
 from app.config import Config
@@ -11,10 +11,13 @@ def create_app(config_class=Config):
 
     db.init_app(app)
     migrate.init_app(app, db)
+    from app.security import install_security
+    install_security(app)
     CORS(
         app,
-        supports_credentials=True,
-        origins=app.config.get("CORS_ORIGINS", "http://localhost:5173").split(","),
+        supports_credentials=False,
+        origins=[origin.strip() for origin in app.config.get("CORS_ORIGINS", "http://localhost:5173").split(",")],
+        allow_headers=["Authorization", "Content-Type"],
     )
 
     from app.auth.routes import auth_bp
@@ -30,12 +33,21 @@ def create_app(config_class=Config):
     app.register_blueprint(admin_bp, url_prefix="/api/admin")
     app.register_blueprint(webhooks_bp, url_prefix="/api/webhooks/shopify")
 
-    # Serves the photos saved by storage_service.py. In production, it's
-    # more efficient to have nginx serve this path directly as static
-    # files instead of proxying through Flask -- this route is a
-    # perfectly fine default either way.
+    # Evidence is private. Never expose this directory through an nginx alias.
+    from app.utils.admin_auth import admin_required
     @app.route("/uploads/<path:filename>")
+    @admin_required
     def uploaded_file(filename):
+        import re
+        from app.models import ReturnRequest, ExchangeRequest
+        match = re.fullmatch(r"returns/((RET|EXC)-[A-Z0-9]+)/[a-f0-9]{32}\.jpg", filename)
+        if not match:
+            abort(404)
+        number, kind = match.groups()
+        model, column = (ReturnRequest, ReturnRequest.return_number) if kind == "RET" else (ExchangeRequest, ExchangeRequest.exchange_number)
+        record = model.query.filter(column == number).first()
+        if not record or "/uploads/" + filename not in (record.photo_urls or []):
+            abort(404)
         return send_from_directory(app.config["PHOTOS_STORAGE_DIR"], filename)
 
     @app.cli.command("sync-shopify-returns")

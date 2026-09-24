@@ -6,3 +6,12 @@ uploads/
 local_uploads/
 migrations/__pycache__/
 migrations/versions/__pycache__/
+.security-tools/
+.security-runtime/
+security-test-output.txt
+security-install-report.json
+.env.*
+!.env.example
+!.env.local.example
+*.sql
+*.dump

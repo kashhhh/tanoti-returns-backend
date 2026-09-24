@@ -1,0 +1,20 @@
+[Unit]
+Description=Clean expired Tanoti OTPs, abuse counters and photos
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=tanoti
+Group=tanoti
+WorkingDirectory=/srv/tanoti/backend
+EnvironmentFile=/etc/tanoti/backend.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/srv/tanoti/backend/venv/bin/flask --app run cleanup-security
+ExecStart=/srv/tanoti/backend/venv/bin/flask --app run cleanup-photos
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/tanoti
+

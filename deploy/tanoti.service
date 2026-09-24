@@ -1,0 +1,34 @@
+[Unit]
+Description=Tanoti Returns API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=tanoti
+Group=tanoti
+WorkingDirectory=/srv/tanoti/backend
+EnvironmentFile=/etc/tanoti/backend.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/srv/tanoti/backend/venv/bin/gunicorn --bind 127.0.0.1:8000 --workers 2 --timeout 60 --limit-request-line 4094 --limit-request-fields 50 --error-logfile - run:app
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+StateDirectory=tanoti
+ReadWritePaths=/var/lib/tanoti
+# Tune against actual Droplet RAM and upload load before enabling.
+MemoryMax=768M
+TasksMax=128
+
+[Install]
+WantedBy=multi-user.target

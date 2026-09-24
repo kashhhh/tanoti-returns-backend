@@ -8,6 +8,7 @@ from flask import Blueprint, current_app, request, jsonify
 from app.extensions import db
 from app.models import AdminOTP
 from app.services.email_service import send_admin_otp_email
+from app.security import limited, lock_login
 
 admin_auth_bp = Blueprint("admin_auth", __name__)
 
@@ -42,6 +43,10 @@ def request_otp():
     email = credentials()
     if not email:
         return jsonify({"error": "Email or admin secret was not accepted"}), 401
+    blocked = limited("admin-send", email, 5, 900)
+    if blocked is not None:
+        return blocked
+    lock_login("admin:" + email)
     now = datetime.utcnow()
     token = db.session.execute(db.select(AdminOTP).filter_by(email=email).with_for_update()).scalar_one_or_none()
     if token and (now - token.created_at).total_seconds() < current_app.config["OTP_RESEND_COOLDOWN_SECONDS"]:
@@ -60,6 +65,8 @@ def request_otp():
     try:
         send_admin_otp_email(email, code)
     except Exception:
+        token.consumed = True
+        db.session.commit()
         current_app.logger.warning("Admin OTP delivery failed")
         return jsonify({"error": "Could not send the code. Please try again shortly."}), 503
     return jsonify({
@@ -77,6 +84,7 @@ def verify_otp():
     code = (request.get_json(silent=True) or {}).get("otp", "")
     if not isinstance(code, str) or len(code.strip()) != 6 or not code.strip().isdigit():
         return jsonify({"error": "Enter the six-digit code"}), 400
+    lock_login("admin:" + email)
     token = db.session.execute(db.select(AdminOTP).filter_by(email=email).with_for_update()).scalar_one_or_none()
     if not token or token.consumed or token.expires_at <= datetime.utcnow():
         return jsonify({"error": "Code expired or already used. Request a new code."}), 400

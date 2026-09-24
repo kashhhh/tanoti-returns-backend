@@ -110,6 +110,8 @@ def required_photos(files):
             raise ValueError("Each photo must be 10 MB or smaller")
         try:
             with Image.open(photo.stream) as img:
+                if img.format not in {"JPEG", "PNG", "WEBP"}:
+                    raise ValueError("Unsupported image format")
                 if img.width * img.height > 25_000_000:
                     raise ValueError("Photo resolution is too large; maximum 25 megapixels")
                 img.verify()

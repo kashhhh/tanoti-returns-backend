@@ -39,7 +39,7 @@ def verify_webhook_hmac(request_data: bytes, hmac_header: str) -> bool:
         return False
     digest = hmac.new(secret.encode(), request_data, hashlib.sha256).digest()
     computed = base64.b64encode(digest).decode()
-    return hmac.compare_digest(computed, hmac_header or "")
+    return hmac.compare_digest(computed.encode("ascii"), (hmac_header or "").encode("utf-8"))
 
 
 def _get_access_token() -> str:
@@ -89,12 +89,13 @@ def find_customer_by_email(email: str):
     resp = requests.get(
         f"{_base_url()}/customers/search.json",
         headers=_headers(),
-        params={"query": f"email:{email}"},
+        params={"query": f'email:"{email}"'},
         timeout=10,
     )
     resp.raise_for_status()
     customers = resp.json().get("customers", [])
-    return customers[0] if customers else None
+    return next((customer for customer in customers
+                 if (customer.get("email") or "").strip().lower() == email.strip().lower()), None)
 
 
 def fetch_orders_for_customer(shopify_customer_id: str):

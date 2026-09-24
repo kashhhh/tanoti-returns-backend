@@ -308,6 +308,14 @@ class AdminSettings(db.Model):
         return settings
 
 
+class SecurityRateLimit(db.Model):
+    __tablename__ = "security_rate_limits"
+    key = db.Column(db.String(64), primary_key=True)
+    window = db.Column(db.BigInteger, primary_key=True)
+    count = db.Column(db.Integer, nullable=False)
+    expires_at = db.Column(db.BigInteger, nullable=False, index=True)
+
+
 class OTPToken(db.Model):
     __tablename__ = "otp_tokens"
 

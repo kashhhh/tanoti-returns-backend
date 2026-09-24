@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily Tanoti retention cleanup
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=900
+Persistent=true
+
+[Install]
+WantedBy=timers.target

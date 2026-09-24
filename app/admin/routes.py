@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from flask import Blueprint, request, jsonify, g
+from flask import Blueprint, request, jsonify, g, current_app
 
 from app.extensions import db
 from app.models import (
@@ -207,7 +207,8 @@ def accept_parcel(kind, number):
                     raise ValueError("Shopify did not return a gift card code")
             except Exception as e:
                 db.session.commit()
-                return jsonify({"error": f"Parcel accepted, but gift card issuance failed: {e}"}), 502
+                current_app.logger.warning("Gift card issuance failed for %s", req.return_number)
+                return jsonify({"error": "Gift card issuance could not be confirmed. Reconcile in Shopify before retrying."}), 502
         req.status = RequestStatus.COMPLETED
         req.completed_at = datetime.utcnow() if req.refund_mode == RefundMode.GIFT_CARD else None
 

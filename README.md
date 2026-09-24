@@ -1,3 +1,7 @@
+Current security/deployment instructions: **[SECURITY.md](SECURITY.md)**. They supersede the older mock-mode, public-upload, development-secret and production setup examples below. Deploy backend and frontend together, install from `requirements.lock`, and apply migration `78ad903bc612`. Production now fails closed on unsafe/missing configuration.
+
+For local development, explicitly set `APP_ENV=development`, `TRUST_PROXY=false`, a randomly generated `SECRET_KEY` of at least 32 characters, and `TESTING_MODE=true` if console OTP delivery is needed. Real Shopify operations remain live.
+
 ## Request dashboard and customer navigation
 
 The admin UI opens on Needs review, oldest first, with 25 records per page. The
