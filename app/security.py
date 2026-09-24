@@ -21,6 +21,8 @@ def validate_config(app):
         return
     if app.debug or app.config.get("TESTING_MODE"):
         raise RuntimeError("Production cannot run with DEBUG or TESTING_MODE")
+    if not app.config.get("SESSION_COOKIE_SECURE"):
+        raise RuntimeError("Production sessions require Secure cookies")
     admin_secret = app.config.get("ADMIN_SECRET_KEY", "")
     if len(admin_secret) < 32 or admin_secret == secret:
         raise RuntimeError("Production requires an independent ADMIN_SECRET_KEY of at least 32 characters")
@@ -80,7 +82,18 @@ def install_security(app):
 
     @app.before_request
     def protect_auth():
-        if request.method == "POST" and request.path.startswith(("/api/auth/", "/api/admin/auth/")):
+        unsafe = request.method not in {"GET", "HEAD", "OPTIONS"}
+        webhook = request.path.startswith("/api/webhooks/")
+        if unsafe and request.path.startswith("/api/") and not webhook:
+            origins = {value.strip() for value in app.config["CORS_ORIGINS"].split(",")}
+            origin = request.headers.get("Origin")
+            if (origin and origin not in origins) or request.headers.get("Sec-Fetch-Site") == "cross-site":
+                return jsonify({"error": "Request origin is not allowed"}), 403
+            if request.is_json:
+                request.max_content_length = 4096 if request.path.startswith(("/api/auth/", "/api/admin/auth/")) else 64 * 1024
+                if not isinstance(request.get_json(silent=True), dict):
+                    return jsonify({"error": "Expected a JSON object"}), 400
+        if request.method == "POST" and request.path.endswith(("/request-otp", "/resend-otp", "/verify-otp")) and request.path.startswith(("/api/auth/", "/api/admin/auth/")):
             request.max_content_length = 4096
             if request.content_length and request.content_length > 4096:
                 return jsonify({"error": "Login request is too large"}), 413
@@ -110,7 +123,16 @@ def install_security(app):
     @app.cli.command("cleanup-security")
     def cleanup_security():
         from datetime import datetime
-        from app.models import OTPToken
+        from app.models import OTPToken, AuthSession
         SecurityRateLimit.query.filter(SecurityRateLimit.expires_at < int(time.time())).delete()
         OTPToken.query.filter(OTPToken.expires_at < datetime.utcnow()).delete()
+        AuthSession.query.filter(AuthSession.expires_at < datetime.utcnow()).delete()
+        db.session.commit()
+
+    @app.cli.command("revoke-sessions")
+    def revoke_sessions():
+        """Emergency revocation of every customer and admin session."""
+        from datetime import datetime
+        from app.models import AuthSession
+        AuthSession.query.filter(AuthSession.revoked_at.is_(None)).update({"revoked_at": datetime.utcnow()})
         db.session.commit()

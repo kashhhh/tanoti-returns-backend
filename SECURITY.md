@@ -1,24 +1,26 @@
-# Security review and manual rollout — 19 September 2026
+# Security review and manual rollout — 24 September 2026
 
 This review covers the local Flask/React source and dependency manifests. The DigitalOcean VPS was not accessed or changed. The app is not serving customers yet. The templates assume Ubuntu/Debian, systemd, nginx, and PostgreSQL; adapt them to the installed OS and existing paths before applying.
+
+Round 2 implementation, verification and outstanding launch risks: **[SECURITY_ROUND_2.md](SECURITY_ROUND_2.md)**. VPS work below is still deferred.
 
 ## Prioritized findings
 
 | Priority | Risk in this app | Change / remaining work |
 | --- | --- | --- |
-| High | Anyone possessing an evidence photo URL could download it without logging in. | `/uploads/` now requires an allowlisted admin JWT and a matching request record. The admin UI fetches private blobs. Remove any nginx upload alias/static location or this protection can be bypassed. |
+| High | Anyone possessing an evidence photo URL could download it without logging in. | `/uploads/` now requires an allowlisted admin session and a matching request record. The admin UI fetches private blobs. Remove any nginx upload alias/static location or this protection can be bypassed. |
 | High | Customer lookup selected the first Shopify search result, allowing a wrong-account association if search semantics broadened a match. | Strict email input, quoted search, and exact normalized email comparison before accepting a customer. |
 | High | Customer OTP request bypassed resend cooldown; older OTPs remained usable; verification was not serialized across workers; cheap hashes allowed offline six-digit guessing from a database leak. | Shared send/resend cooldown, old-code invalidation, keyed HMAC hashes, PostgreSQL transaction locks, and single-use consumption. Admin issuance also serialized. |
 | High | OTP/email flooding and admin-secret guessing had no shared per-IP/account budget. | Database-backed atomic counters across workers: 30 auth POSTs/IP/minute, 20 auth POSTs/email/15 minutes, 5 sends/email/15 minutes, and 2 customer resyncs/5 minutes. nginx adds edge limits. |
 | High | Known vulnerabilities in old package versions, including the image parser, CORS library and build server. | Upgraded affected packages, refreshed frontend lockfile and added a resolved backend lockfile. Post-upgrade audits returned no known vulnerabilities on review date. |
 | High if deployed insecurely | Default signing key and forced Flask debug mode; production could log OTPs. | Strong secret checks, independent admin secret, production configuration checks, explicit development mode, debug off. Production refuses console OTP delivery and missing email/webhook configuration. |
-| Medium | Customer JWT accepted insufficient claims and lasted a week; customer tokens persisted in localStorage. | Required expiration, issued-at, audience, subject and customer role; 8-hour lifetime; browser-tab sessionStorage; old localStorage entries removed. Both kinds of token remain readable by JavaScript. |
-| Medium | Browser framing, caching of customer data, and weak static-site response policy. | API no-store/nosniff/frame protections. nginx template adds CSP, HSTS, TLS, and matching frontend policy. CORS credentials disabled; explicit origins required in production. |
+| Medium | Customer JWT accepted insufficient claims and lasted a week; customer tokens persisted in localStorage. | Round 2 replaces bearer tokens with opaque, revocable, eight-hour HttpOnly cookies, role-specific CSRF protection, and logout-all. Legacy bearer authentication is rejected. |
+| Medium | Browser framing, caching of customer data, and weak static-site response policy. | API no-store/nosniff/frame protections. nginx template adds CSP, HSTS, TLS, and matching frontend policy. Credentialed CORS uses explicit origins; same-origin frontend deployment is required. |
 | Medium | Upload parsing and public services can exhaust a small VPS. | Existing image re-encoding and size/pixel limits retained; decoded format checked; form parts/memory and login body size bounded. nginx request/connection limits and systemd resource caps supplied. Load-test against actual Droplet capacity. |
 
 Authorization checks on customer orders/submissions, parameterized ORM queries, admin email allowlisting, cryptographic OTP generation, and webhook HMAC verification already existed. Existing ownership tests still pass. This was not an incident investigation.
 
-## Local verification completed
+## Round 1 verification (19 September; round 2 results linked above)
 
 - 64 backend tests passed against the updated dependencies, including 11 new security regressions and the schema-preservation migration test. Tests use isolated SQLite databases and mocked external providers.
 - Production frontend build passed with Vite 8.3.0 and React Router 7.18.4. Browser checks confirmed the customer login and admin login render without reported console errors, and unauthenticated admin navigation redirects to login.
@@ -66,7 +68,7 @@ Use a dedicated non-login service user named `tanoti`. The supplied paths are:
 
 Keep application code and its virtualenv owned by your deployment user/root and read-only to the service user. Do not make the entire application tree writable to `tanoti`. nginx needs read access only to compiled frontend files. Copy existing images into the private upload directory while preserving their `returns/<request-number>/<filename>.jpg` structure; confirm ownership before restart. Do not delete the old copy until verification succeeds, but remove all public routes to it immediately.
 
-Generate two independent secrets with `python3 -c 'import secrets; print(secrets.token_urlsafe(48))'`, run separately for each secret. Do not reuse the admin login secret as the JWT signing key. Store credentials only in the production environment file, never in frontend `VITE_*` variables, Git, deploy archives or chat.
+Generate two independent secrets with `python3 -c 'import secrets; print(secrets.token_urlsafe(48))'`, run separately for each secret. Do not reuse the admin login secret as the server SECRET_KEY. Store credentials only in the production environment file, never in frontend `VITE_*` variables, Git, deploy archives or chat.
 
 Required security settings in `/etc/tanoti/backend.env`:
 
@@ -121,7 +123,7 @@ sudo systemd-run --wait --pipe --collect \
   /srv/tanoti/backend/venv/bin/flask --app run db upgrade
 ```
 
-If you separate migration and runtime database roles, use a separate migration environment file and role for this command. Migration `78ad903bc612` adds the abuse-counter table. Deploying code without this table breaks login. All prior migrations must already be applied or upgraded in order. Existing customer JWTs and OTPs are intentionally invalidated by the new claim/hash rules; users must log in again. Rotating `SECRET_KEY` invalidates admin sessions too.
+If you separate migration and runtime database roles, use a separate migration environment file and role for this command. Run through migration `c94a8e2fd061`, following `78ad903bc612`. These add abuse counters, sessions, webhook receipts, gift-card issuance records, admin audit records and order update timestamps. Deploying code without the tables breaks login. Deploy both components together; all legacy bearer sessions are rejected and users must sign in again. Rotating `SECRET_KEY` invalidates all sessions and outstanding OTPs.
 
 ### 4. Enable the service and nginx policy
 
@@ -153,7 +155,7 @@ sudo systemctl enable --now tanoti-cleanup.timer
 sudo systemctl list-timers tanoti-cleanup.timer
 ```
 
-This purges expired OTPs/counters and applies the existing photo retention policy. Separately retain/configure the email retry and Shopify sync jobs described in the backend README. Monitor service failures, 429/5xx rates, disk space, pending emails, certificate expiry and database backup success. Avoid logging Authorization headers, OTPs, request bodies or raw secrets; nginx's template access log omits query strings. Protect/rotate access logs, which still contain IPs and request identifiers.
+This purges expired OTPs/counters/sessions and applies the existing photo retention policy. Separately retain/configure the email retry and Shopify sync jobs described in the backend README. Monitor service failures, 429/5xx rates, disk space, pending emails, certificate expiry and database backup success. Avoid logging Authorization headers, OTPs, request bodies or raw secrets; nginx's template access log omits query strings. Protect/rotate access logs, which still contain IPs and request identifiers.
 
 Enable encrypted off-Droplet database backups with limited access and a defined retention policy. Include private photos if they are needed for dispute recovery. Periodically restore both to a staging environment. Keep secrets out of ordinary backup/deploy archives. Re-run package audits before deployment and regularly afterward; no-known-vulnerabilities is a point-in-time result.
 
@@ -161,9 +163,9 @@ Enable encrypted off-Droplet database backups with limited access and a defined 
 
 1. `https://returns.tanotiofficial.com` loads, HTTP redirects to HTTPS, certificates validate, and login/admin navigation works.
 2. Inspect response headers: the frontend has CSP/HSTS/frame protection; customer/admin API responses have `Cache-Control: no-store`.
-3. Open an actual stored `/uploads/...jpg` URL in a signed-out browser: expect 401, never the image. Admin preview/full-size view must work. A customer bearer token must also be refused on this route.
+3. Open an actual stored `/uploads/...jpg` URL in a signed-out browser: expect 401, never the image. Admin preview/full-size view must work. A customer session must also be refused on this route.
 4. Request/resend a code twice rapidly: the second send is throttled. Try five wrong codes, then the correct one: verification remains blocked. Resend after the cooldown: old code fails; new code works once. Verify real email receipt with `TESTING_MODE=false`.
-5. Verify two different customers cannot access each other's items or requests. Try a customer token on an admin route and vice versa: both must fail.
+5. Verify two different customers cannot access each other's items or requests. Try a customer session on an admin route and vice versa: both must fail.
 6. Run a PostgreSQL staging concurrency check using multiple workers: simultaneous verifications of one OTP produce at most one successful login; simultaneous sends cannot bypass the cooldown. Local SQLite tests do not prove PostgreSQL locking behavior.
 7. Verify from outside the Droplet that only intended public ports respond. Confirm `.env`, archives and private database ports are inaccessible. Inspect IPv6 rules as well as IPv4.
 8. Verify invalid webhook signatures fail; valid staging webhooks still sync. Check failed external-provider calls never expose credentials in client responses.
@@ -171,12 +173,7 @@ Enable encrypted off-Droplet database backups with limited access and a defined 
 
 ## Remaining work and limits
 
-- **Session theft / revocation:** sessionStorage reduces persistence but does not protect tokens from JavaScript executing in the origin. CSP helps reduce that risk; it does not eliminate it. Move to HttpOnly Secure cookies plus CSRF protection and server-side revocable sessions for stronger protection. Current logout clears the browser token; a copied token remains valid until expiry. Rotate the signing key to revoke all sessions in an incident.
-- **Financial integrity:** gift-card issuance still lacks durable recovery across a provider-success/local-crash window. Do not retry an ambiguous issuance until reconciling in Shopify. Refund valuation against discounts and partial refunds also needs reconciliation tests (see `PRODUCTION_REVIEW.md`). These are rollout blockers for unattended financial processing and are not solved by firewall changes.
-- **Webhook replay/order:** valid signed callbacks can be repeated; durable delivery-ID deduplication and stale-event protection remain desirable. HMAC prevents forgery, not replay. Test burst behavior and provider retries in staging.
-- **Staff accountability:** admin access still uses an allowlisted email, shared secret and email OTP. Individual credentials/passkeys and a comprehensive tamper-resistant admin action log would provide stronger accountability.
-- **Enumeration / denial of service:** matching send responses reduces direct account enumeration but timing/cooldown differences may remain. Per-account limits can be abused to temporarily deny login, and distributed floods still need edge monitoring/challenges if they occur. No live penetration/load test was performed.
-- **Infrastructure verification:** the nginx/systemd files are reviewable templates, not verified live configuration. They require `nginx -t`, systemd checks and staging tests on the actual VPS. No SSH/firewall/cloud resources were changed.
+See the current prioritized risks and acceptance checks in [SECURITY_ROUND_2.md](SECURITY_ROUND_2.md). VPS templates remain unverified on the actual server; no infrastructure changes have been made.
 
 ## References
 

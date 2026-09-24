@@ -98,6 +98,18 @@ def find_customer_by_email(email: str):
                  if (customer.get("email") or "").strip().lower() == email.strip().lower()), None)
 
 
+def fetch_order(order_id: str):
+    resp = requests.get(f"{_base_url()}/orders/{order_id}.json", headers=_headers(), timeout=10)
+    resp.raise_for_status()
+    return resp.json()["order"]
+
+
+def fetch_gift_card(card_id: str):
+    resp = requests.get(f"{_base_url()}/gift_cards/{card_id}.json", headers=_headers(), timeout=10)
+    resp.raise_for_status()
+    return resp.json()["gift_card"]
+
+
 def fetch_orders_for_customer(shopify_customer_id: str):
     """Pulls orders for a customer -- used by the sync job / on-demand
     refresh so the local Order/OrderItem cache stays current."""
@@ -145,7 +157,7 @@ def get_variants_for_product(shopify_product_id: str, original_variant_id=None):
             for v in variants if original is None or all(v.get(f"option{i}") == original.get(f"option{i}") for i in (1,2,3) if i != position)]
 
 
-def issue_gift_card(amount: str, note: str = ""):
+def issue_gift_card(amount: str, note: str = "", *, code: str):
     """Creates a Shopify gift card for the given amount (as a decimal
     string, e.g. '1499.00') and returns its code + admin GID.
     Called when the owner accepts a return with refund_mode = gift_card.
@@ -154,6 +166,7 @@ def issue_gift_card(amount: str, note: str = ""):
         "gift_card": {
             "initial_value": amount,
             "note": note,
+            "code": code,
         }
     }
     resp = requests.post(

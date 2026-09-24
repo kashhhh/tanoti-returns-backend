@@ -4,12 +4,13 @@ import re
 import secrets
 from datetime import datetime, timedelta
 
-from flask import Blueprint, request, jsonify, current_app
+from flask import Blueprint, request, jsonify, current_app, g
 
 from app.extensions import db
 from app.models import Customer, OTPToken
 from app.services import shopify_client, email_service, sync_service
-from app.utils.decorators import issue_token
+from app.utils.decorators import login_required
+from app.utils.sessions import create_session, csrf_token, set_session_cookie, logout_response
 from app.security import limited, lock_login
 
 auth_bp = Blueprint("auth", __name__)
@@ -132,8 +133,28 @@ def verify_otp():
     if not customer.orders or any(not order.shipping_address for order in customer.orders):
         sync_service.sync_orders_for_customer(customer.shopify_customer_id)
 
-    jwt_token = issue_token(customer)
-    return jsonify({
-        "token": jwt_token,
+    raw = create_session("customer", customer.id, customer.email)
+    db.session.commit()
+    return set_session_cookie(jsonify({
+        "csrf_token": csrf_token(raw),
         "customer": {"id": customer.id, "email": customer.email, "name": customer.name},
-    })
+    }), "customer", raw)
+
+
+@auth_bp.get("/session")
+@login_required
+def session_info():
+    return jsonify({"csrf_token": g.csrf_token,
+                    "customer": {"id": g.customer.id, "email": g.customer.email, "name": g.customer.name}})
+
+
+@auth_bp.post("/logout")
+@login_required
+def logout():
+    return logout_response("customer")
+
+
+@auth_bp.post("/logout-all")
+@login_required
+def logout_all():
+    return logout_response("customer", all_sessions=True)

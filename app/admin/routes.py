@@ -5,7 +5,7 @@ from flask import Blueprint, request, jsonify, g, current_app
 from app.extensions import db
 from app.models import (
     ReturnRequest, ExchangeRequest, AdminSettings, RequestStatus,
-    RejectionReason, RefundMode,
+    RejectionReason, RefundMode, GiftCardIssuance,
 )
 from app.utils.admin_auth import admin_required
 from app.services import shopify_client, shipping_service
@@ -70,6 +70,9 @@ def _row(obj, kind: str, repeat_flags=None) -> dict:
         row["refund_mode"] = obj.refund_mode.value
         row["net_refund_amount"] = str(obj.net_refund_amount)
         row["gift_card_code"] = obj.gift_card_code
+        issuance = db.session.get(GiftCardIssuance, obj.id)
+        row["gift_card_issuance_state"] = issuance.state if issuance else ("legacy_review" if obj.refund_mode == RefundMode.GIFT_CARD and obj.parcel_decision_at and not obj.gift_card_code else None)
+        row["gift_card_provider_id"] = issuance.provider_id if issuance else None
         row["refund_paid_at"] = obj.refund_paid_at.isoformat() if obj.refund_paid_at else None
         row["refund_paid_by"] = obj.refund_paid_by
     else:
@@ -183,6 +186,9 @@ def accept_parcel(kind, number):
     choice = (request.get_json(silent=True) or {}).get("restock")
     if not isinstance(choice, bool):
         return jsonify({"error": "Choose whether the inspected item should be restocked"}), 400
+    if kind == "return" and req.refund_mode == RefundMode.GIFT_CARD:
+        if db.session.get(GiftCardIssuance, req.id) or req.gift_card_code or req.parcel_decision_at:
+            return jsonify({"error": "A gift card may already exist. Reconcile the existing issuance before proceeding."}), 409
     req.restock = choice
     if kind == "exchange":
         try:
@@ -198,17 +204,14 @@ def accept_parcel(kind, number):
 
     if kind == "return":
         if req.refund_mode == RefundMode.GIFT_CARD:
+            from app.services.gift_card_service import issue_once, IssuanceUncertain
             try:
-                gift_card = shopify_client.issue_gift_card(
-                    amount=str(req.net_refund_amount), note=f"Refund for {req.return_number}"
-                )
-                req.gift_card_code = gift_card.get("code")
-                if not req.gift_card_code:
-                    raise ValueError("Shopify did not return a gift card code")
-            except Exception as e:
-                db.session.commit()
-                current_app.logger.warning("Gift card issuance failed for %s", req.return_number)
-                return jsonify({"error": "Gift card issuance could not be confirmed. Reconcile in Shopify before retrying."}), 502
+                issue_once(req)
+            except IssuanceUncertain as exc:
+                return jsonify({"error": str(exc)}), 409
+            except ValueError as exc:
+                db.session.rollback()
+                return jsonify({"error": str(exc)}), 400
         req.status = RequestStatus.COMPLETED
         req.completed_at = datetime.utcnow() if req.refund_mode == RefundMode.GIFT_CARD else None
 
@@ -240,6 +243,44 @@ def accept_parcel(kind, number):
     return jsonify(_row(req, kind))
 
 
+@admin_bp.post("/requests/return/<number>/reconcile-gift-card")
+@admin_required
+def reconcile_gift_card(number):
+    import re
+    from app.services.gift_card_service import confirm
+    req = _find_request("return", number)
+    if not req:
+        return jsonify({"error": "Not found"}), 404
+    attempt = db.session.get(GiftCardIssuance, req.id)
+    if not attempt:
+        return jsonify({"error": "No recoverable issuance record exists. Manual investigation is required."}), 409
+    if attempt.state == "confirmed":
+        return jsonify(_row(req, "return"))
+    if req.status != RequestStatus.PARCEL_RECEIVED:
+        return jsonify({"error": "Refund is not awaiting reconciliation"}), 409
+    ident = (request.get_json(silent=True) or {}).get("gift_card_id", "")
+    if not isinstance(ident, str) or not re.fullmatch(r"[1-9][0-9]{0,19}", ident):
+        return jsonify({"error": "Enter the numeric Shopify gift card ID"}), 400
+    try:
+        card = shopify_client.fetch_gift_card(ident)
+        if str(card.get("id")) != ident:
+            raise ValueError("Shopify returned a different gift card")
+        confirm(attempt, req, card)
+    except ValueError as exc:
+        db.session.rollback()
+        return jsonify({"error": str(exc)}), 409
+    except Exception:
+        db.session.rollback()
+        return jsonify({"error": "Could not verify the existing gift card with Shopify. No new card was created."}), 503
+    req.status = RequestStatus.COMPLETED
+    req.completed_at = datetime.utcnow()
+    queue_update(req, "return", "gift_card")
+    db.session.commit()
+    sync_one(req, "return")
+    deliver_pending(limit=1)
+    return jsonify(_row(req, "return"))
+
+
 @admin_bp.route("/requests/<kind>/<number>/reject-parcel", methods=["POST"])
 @admin_required
 def reject_parcel(kind, number):
@@ -253,12 +294,17 @@ def reject_parcel(kind, number):
 
 
 def _reject(req, kind, number, stage: str):
+    if kind == "return" and (db.session.get(GiftCardIssuance, req.id) or req.gift_card_code
+                              or (req.refund_mode == RefundMode.GIFT_CARD and req.parcel_decision_at)):
+        return jsonify({"error": "A gift card may already exist. Reconcile it before changing this refund."}), 409
     data = request.json or {}
     reason = data.get("rejection_reason")
     note = data.get("note", "")
-    if reason not in RejectionReason._value2member_map_:
+    if not isinstance(reason, str) or reason not in RejectionReason._value2member_map_:
         return jsonify({"error": "A valid rejection_reason is required"}), 400
 
+    if not isinstance(note, str) or len(note) > 2000:
+        return jsonify({"error": "Rejection note must be at most 2,000 characters"}), 400
     req.status = RequestStatus.REJECTED
     req.rejected_stage = stage
     req.rejection_reason = RejectionReason(reason)
@@ -359,15 +405,38 @@ def get_settings():
 @admin_bp.route("/settings", methods=["PUT"])
 @admin_required
 def update_settings():
+    from decimal import Decimal, InvalidOperation
     s = AdminSettings.get()
     data = request.json or {}
-
-    if "return_window_days" in data:
-        s.return_window_days = int(data["return_window_days"])
-    if "deduction_enabled" in data:
-        s.deduction_enabled = bool(data["deduction_enabled"])
-    if "deduction_amount" in data:
-        s.deduction_amount = data["deduction_amount"]
-
+    days = data.get("return_window_days", s.return_window_days)
+    enabled = data.get("deduction_enabled", s.deduction_enabled)
+    try:
+        amount = Decimal(str(data.get("deduction_amount", s.deduction_amount)))
+        if not amount.is_finite() or not 0 <= amount <= Decimal("99999999.99") or amount != amount.quantize(Decimal("0.01")):
+            raise ValueError()
+    except (InvalidOperation, ValueError):
+        return jsonify({"error": "Deduction must be a nonnegative amount with at most two decimal places"}), 400
+    if type(days) is not int or not 1 <= days <= 365 or type(enabled) is not bool:
+        return jsonify({"error": "Return window must be 1–365 days and deduction_enabled must be a boolean"}), 400
+    s.return_window_days = days
+    s.deduction_enabled = enabled
+    s.deduction_amount = amount
+    from app.utils.audit import record_admin_action
+    record_admin_action("settings_updated", "settings")
     db.session.commit()
     return jsonify({"message": "Settings updated"})
+
+
+@admin_bp.get("/audit")
+@admin_required
+def audit_log():
+    from app.models import AdminAudit
+    try:
+        page = int(request.args.get("page", "1"))
+        if not 1 <= page <= 10000:
+            raise ValueError()
+    except ValueError:
+        return jsonify({"error": "Invalid audit page"}), 400
+    rows = AdminAudit.query.order_by(AdminAudit.id.desc()).offset((page - 1) * 50).limit(50).all()
+    return jsonify({"page": page, "events": [{"id": row.id, "actor": row.actor, "action": row.action,
+                      "target": row.target, "created_at": row.created_at.isoformat()} for row in rows]})

@@ -6,14 +6,13 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
-import jwt
 from PIL import Image
 from app import create_app
 from app.config import Config
 from app.extensions import db
 from app.models import (Customer, Order, OrderItem, PaymentMethod, AdminOTP,
                         ReturnRequest, ExchangeRequest, Notification, RequestStatus)
-from app.utils.decorators import issue_token
+from app.utils.sessions import create_session, cookie_name, csrf_token
 from app.services.notification_service import deliver_pending
 from app.services.storage_service import cleanup_old_photos
 
@@ -28,11 +27,18 @@ def photo():
     return stream, "item.jpg"
 
 
+def session_headers(role, subject, email):
+    raw = create_session(role, subject, email)
+    db.session.commit()
+    return {"Cookie": f"{cookie_name(role)}={raw}", "X-CSRF-Token": csrf_token(raw)}
+
+
 class WorkflowTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         class TestConfig(Config):
             TESTING = True
+            SESSION_COOKIE_SECURE = False
             TESTING_MODE = True
             SECRET_KEY = "test-signing-key"
             ADMIN_SECRET_KEY = "test-admin-secret"
@@ -50,12 +56,9 @@ class WorkflowTests(unittest.TestCase):
         item = OrderItem(order=order, shopify_line_item_id="1", product_title="Shirt <b>red</b>", price=999, size="S")
         db.session.add(item); db.session.commit()
         self.item_id = item.id
-        self.customer_headers = {"Authorization": "Bearer " + issue_token(customer)}
-        admin = jwt.encode({"sub": "staff@example.com", "role": "admin", "aud": "tanoti-admin",
-                            "iat": datetime.utcnow(), "exp": datetime.utcnow()+timedelta(hours=1)},
-                           self.app.config["SECRET_KEY"], algorithm="HS256")
-        self.admin_headers = {"Authorization": "Bearer " + admin}
-        self.client = self.app.test_client()
+        self.customer_headers = session_headers("customer", customer.id, customer.email)
+        self.admin_headers = session_headers("admin", "staff@example.com", "staff@example.com")
+        self.client = self.app.test_client(use_cookies=False)
         self.network = patch("requests.post", side_effect=AssertionError("Unexpected live network call"))
         self.network.start()
         self.stock = patch("app.services.shopify_client.select_exchange_variant", return_value={"id":"200", "size":"M"})
@@ -99,7 +102,7 @@ class WorkflowTests(unittest.TestCase):
             payload["otp"] = code
             result = self.client.post("/api/admin/auth/verify-otp", json=payload)
             self.assertEqual(result.status_code, 200)
-            self.assertEqual(self.client.get("/api/admin/settings", headers={"Authorization": "Bearer " + result.json["token"]}).status_code, 200)
+            self.assertEqual(self.client.get("/api/admin/settings", headers={"Cookie": result.headers["Set-Cookie"].split(";", 1)[0]}).status_code, 200)
             self.assertEqual(self.client.post("/api/admin/auth/verify-otp", json=payload).status_code, 400)
 
     def test_otp_expiry_attempts_and_resend(self):
@@ -156,7 +159,7 @@ class WorkflowTests(unittest.TestCase):
 
     def test_cannot_submit_for_another_customer(self):
         other = Customer(email="other@example.com"); db.session.add(other); db.session.commit()
-        self.customer_headers = {"Authorization": "Bearer " + issue_token(other)}
+        self.customer_headers = session_headers("customer", other.id, other.email)
         self.assertEqual(self.submit().status_code, 404)
 
     def test_gift_card_flow_emails_and_pickup_address(self):
@@ -165,10 +168,10 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(self.action(number, "accept-photos").status_code, 200)
             self.assertEqual(pickup.call_args.kwargs["pickup_address"]["address1"], "20 Pickup Road")
         self.assertEqual(self.action(number, "mark-parcel-received").status_code, 200)
-        with patch("app.services.shopify_client.issue_gift_card", return_value={"code": "GIFT-123"}):
+        with patch("app.services.shopify_client.issue_gift_card", side_effect=lambda **kw: {"id": 567, "initial_value": kw["amount"], "currency": "INR", "note": kw["note"], "code": kw["code"]}):
             self.assertEqual(self.action(number, "accept-parcel").status_code, 200)
         self.assertEqual(Notification.query.count(), 4)
-        self.assertIn("GIFT-123", Notification.query.filter_by(event_key=number+":gift_card").one().html)
+        self.assertIn(ReturnRequest.query.filter_by(return_number=number).one().gift_card_code, Notification.query.filter_by(event_key=number+":gift_card").one().html)
         self.assertEqual(self.action(number, "accept-parcel").status_code, 400)
         self.assertEqual(Notification.query.count(), 4)
 

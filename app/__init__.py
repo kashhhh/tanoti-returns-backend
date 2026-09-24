@@ -15,9 +15,9 @@ def create_app(config_class=Config):
     install_security(app)
     CORS(
         app,
-        supports_credentials=False,
+        supports_credentials=True,
         origins=[origin.strip() for origin in app.config.get("CORS_ORIGINS", "http://localhost:5173").split(",")],
-        allow_headers=["Authorization", "Content-Type"],
+        allow_headers=["Content-Type", "X-CSRF-Token"],
     )
 
     from app.auth.routes import auth_bp

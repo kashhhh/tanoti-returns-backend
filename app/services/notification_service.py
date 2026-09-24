@@ -14,6 +14,8 @@ def queue_update(obj, kind, event):
     key = f"{number}:{event}"
     if Notification.query.filter_by(event_key=key).first():
         return
+    from app.utils.audit import record_admin_action
+    record_admin_action(event, number)
     text = {
         "refund_paid": ("Refund paid", "Your refund has been marked paid by our team."),
         "delivered": ("Replacement delivered", "Your replacement has been marked delivered. Your exchange is now complete."),

@@ -90,6 +90,7 @@ class Order(db.Model):
 
     id = db.Column(db.Integer, primary_key=True)
     shopify_order_id = db.Column(db.String(64), unique=True, nullable=False, index=True)
+    shopify_updated_at = db.Column(db.DateTime, nullable=True)
     order_number = db.Column(db.String(32), nullable=False, index=True)  # what the customer searches by
     customer_id = db.Column(db.Integer, db.ForeignKey("customers.id"), nullable=False)
 
@@ -306,6 +307,47 @@ class AdminSettings(db.Model):
             db.session.add(settings)
             db.session.commit()
         return settings
+
+
+class AdminAudit(db.Model):
+    __tablename__ = "admin_audit"
+    id = db.Column(db.Integer, primary_key=True)
+    actor = db.Column(db.String(255), nullable=False)
+    action = db.Column(db.String(64), nullable=False)
+    target = db.Column(db.String(64), nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow, index=True)
+
+
+class AuthSession(db.Model):
+    __tablename__ = "auth_sessions"
+    token_hash = db.Column(db.String(64), primary_key=True)
+    role = db.Column(db.String(16), nullable=False)
+    subject = db.Column(db.String(255), nullable=False, index=True)
+    identity_email = db.Column(db.String(255), nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    expires_at = db.Column(db.DateTime, nullable=False, index=True)
+    revoked_at = db.Column(db.DateTime)
+
+
+class WebhookReceipt(db.Model):
+    __tablename__ = "webhook_receipts"
+    fingerprint = db.Column(db.String(64), primary_key=True)
+    delivery_id = db.Column(db.String(128), nullable=False)
+    topic = db.Column(db.String(64), nullable=False)
+    processed_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+
+
+class GiftCardIssuance(db.Model):
+    __tablename__ = "gift_card_issuances"
+    return_id = db.Column(db.Integer, db.ForeignKey("return_requests.id"), primary_key=True)
+    code = db.Column(db.String(32), nullable=False, unique=True)
+    amount = db.Column(db.Numeric(10, 2), nullable=False)
+    state = db.Column(db.String(16), nullable=False, default="pending")
+    provider_id = db.Column(db.String(64), unique=True)
+    requested_by = db.Column(db.String(255), nullable=False)
+    confirmed_by = db.Column(db.String(255))
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    confirmed_at = db.Column(db.DateTime)
 
 
 class SecurityRateLimit(db.Model):

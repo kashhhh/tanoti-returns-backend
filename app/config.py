@@ -11,6 +11,9 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 class Config:
     SECRET_KEY = os.environ.get("SECRET_KEY", "")
     APP_ENV = os.environ.get("APP_ENV", "production")
+    SESSION_COOKIE_SECURE = APP_ENV != "development"
+    CUSTOMER_SESSION_HOURS = 8
+    SHOP_CURRENCY = os.environ.get("SHOP_CURRENCY", "INR")
     RATE_LIMIT_ENABLED = True
     TRUST_PROXY = os.environ.get("TRUST_PROXY", "false").lower() == "true"
     ADMIN_API_KEY = os.environ.get("ADMIN_API_KEY", "change-me-in-prod")
@@ -21,7 +24,7 @@ class Config:
     MAX_CONTENT_LENGTH = 22 * 1024 * 1024
     MAX_FORM_MEMORY_SIZE = 64 * 1024
     MAX_FORM_PARTS = 20
-    CORS_ORIGINS = os.environ.get("CORS_ORIGINS", "http://localhost:5173")
+    CORS_ORIGINS = os.environ.get("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173")
     SQLALCHEMY_DATABASE_URI = os.environ.get(
         "DATABASE_URL", "postgresql://localhost/tanoti_returns_v2"
     )
@@ -56,6 +59,3 @@ class Config:
     OTP_EXPIRY_MINUTES = 10
     OTP_RESEND_COOLDOWN_SECONDS = 30
     OTP_MAX_VERIFY_ATTEMPTS = 5
-
-    # Auth session (JWT)
-    JWT_EXPIRY_HOURS = 8

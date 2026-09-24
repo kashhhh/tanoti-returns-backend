@@ -3,12 +3,13 @@ import hmac
 import secrets
 from datetime import datetime, timedelta
 
-import jwt
-from flask import Blueprint, current_app, request, jsonify
+from flask import Blueprint, current_app, request, jsonify, g
 from app.extensions import db
 from app.models import AdminOTP
 from app.services.email_service import send_admin_otp_email
 from app.security import limited, lock_login
+from app.utils.admin_auth import admin_required
+from app.utils.sessions import create_session, csrf_token, set_session_cookie, logout_response
 
 admin_auth_bp = Blueprint("admin_auth", __name__)
 
@@ -95,9 +96,24 @@ def verify_otp():
         db.session.commit()
         return jsonify({"error": "Incorrect code"}), 400
     token.consumed = True
+    raw = create_session("admin", email, email)
     db.session.commit()
-    now = datetime.utcnow()
-    session = jwt.encode({"sub": email, "role": "admin", "aud": "tanoti-admin", "iat": now,
-                          "exp": now + timedelta(hours=current_app.config["ADMIN_SESSION_HOURS"])},
-                         current_app.config["SECRET_KEY"], algorithm="HS256")
-    return jsonify({"token": session, "email": email})
+    return set_session_cookie(jsonify({"csrf_token": csrf_token(raw), "email": email}), "admin", raw)
+
+
+@admin_auth_bp.get("/session")
+@admin_required
+def session_info():
+    return jsonify({"csrf_token": g.csrf_token, "email": g.admin_email})
+
+
+@admin_auth_bp.post("/logout")
+@admin_required
+def logout():
+    return logout_response("admin")
+
+
+@admin_auth_bp.post("/logout-all")
+@admin_required
+def logout_all():
+    return logout_response("admin", all_sessions=True)

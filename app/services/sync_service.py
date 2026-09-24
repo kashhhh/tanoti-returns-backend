@@ -73,8 +73,18 @@ def upsert_customer(shopify_customer: dict) -> Customer:
     return customer
 
 
-def upsert_order(shopify_order: dict, _image_cache: dict = None) -> Order:
+def upsert_order(shopify_order: dict, _image_cache: dict = None, *, commit=True) -> Order:
     from app.services import shopify_client
+    from app.security import lock_login
+
+    order_id = str(shopify_order["id"])
+    lock_login("shopify-order:" + order_id)
+    order = Order.query.filter_by(shopify_order_id=order_id).with_for_update().first()
+    incoming_at = _utc(shopify_order["updated_at"]) if shopify_order.get("updated_at") else None
+    if order and order.shopify_updated_at and (not incoming_at or incoming_at <= order.shopify_updated_at):
+        if commit:
+            db.session.commit()
+        return order
 
     if _image_cache is None:
         _image_cache = {}
@@ -85,10 +95,10 @@ def upsert_order(shopify_order: dict, _image_cache: dict = None) -> Order:
         return None
     customer = upsert_customer(shopify_customer)
 
-    order = Order.query.filter_by(shopify_order_id=str(shopify_order["id"])).with_for_update().first()
     if not order:
         order = Order(shopify_order_id=str(shopify_order["id"]), customer_id=customer.id)
         db.session.add(order)
+    order.shopify_updated_at = incoming_at
 
     order.order_number = str(shopify_order.get("order_number") or shopify_order.get("name", "")).lstrip("#")
     order.customer_id = customer.id
@@ -159,7 +169,10 @@ def upsert_order(shopify_order: dict, _image_cache: dict = None) -> Order:
             if not item.replacement_for and item.shopify_line_item_id not in line_ids:
                 item.unavailable = True
 
-    db.session.commit()
+    if commit:
+        db.session.commit()
+    else:
+        db.session.flush()
     return order
 
 

@@ -118,7 +118,7 @@ class SecurityTests(unittest.TestCase):
     def test_production_startup_fails_closed(self):
         self.app.config.update(TESTING=False, APP_ENV="production", SECRET_KEY="x" * 48,
                                ADMIN_SECRET_KEY="y" * 48, RESEND_API_KEY="configured", TESTING_MODE=False,
-                               SHOPIFY_WEBHOOK_SECRET="configured", CORS_ORIGINS="https://returns.example.com")
+                               SHOPIFY_WEBHOOK_SECRET="configured", CORS_ORIGINS="https://returns.example.com", SESSION_COOKIE_SECURE=True)
         validate_config(self.app)
         for key, bad_value in (("SECRET_KEY", "change-me-in-prod"), ("ADMIN_SECRET_KEY", "x" * 48),
                                ("TESTING_MODE", True), ("DEBUG", True), ("CORS_ORIGINS", "*"),
