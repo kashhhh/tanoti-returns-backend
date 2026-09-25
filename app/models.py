@@ -290,6 +290,22 @@ class ExchangeRequest(db.Model):
 # Settings & auth
 # ---------------------------------------------------------------------------
 
+class ShippingBooking(db.Model):
+    """Durable fence against duplicate carrier bookings after an ambiguous result."""
+    __tablename__ = "shipping_bookings"
+    reference = db.Column(db.String(48), primary_key=True)
+    request_number = db.Column(db.String(20), nullable=False, index=True)
+    leg = db.Column(db.String(16), nullable=False)
+    environment = db.Column(db.String(16), nullable=False)
+    warehouse = db.Column(db.String(255), nullable=False)
+    state = db.Column(db.String(16), nullable=False)
+    waybill = db.Column(db.String(64), unique=True)
+    error = db.Column(db.String(500))
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    __table_args__ = (db.UniqueConstraint("request_number", "leg", name="uq_shipping_request_leg"),)
+
+
 class AdminSettings(db.Model):
     """Single-row table. Use AdminSettings.get() to fetch/create it."""
     __tablename__ = "admin_settings"

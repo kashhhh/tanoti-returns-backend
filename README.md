@@ -1,6 +1,8 @@
+Delhivery automatic collections and replacement shipping: **[DELHIVERY_SETUP.md](DELHIVERY_SETUP.md)**. Apply migrations through `f63d029c471a` before deploying this version.
+
 Latest customer features and deployment steps: **[FEATURE_UPDATE.md](FEATURE_UPDATE.md)**. Native Shopify return/restock sync is now disabled; order imports and gift cards remain active.
 
-Current security/deployment instructions: **[SECURITY.md](SECURITY.md)**. They supersede the older mock-mode, public-upload, development-secret and production setup examples below. Deploy backend and frontend together, install from `requirements.lock`, and apply migrations through `e51a93bc820d`. Production now fails closed on unsafe/missing configuration.
+Current security/deployment instructions: **[SECURITY.md](SECURITY.md)**. They supersede the older mock-mode, public-upload, development-secret and production setup examples below. Deploy backend and frontend together, install from `requirements.lock`, and apply migrations through `f63d029c471a`. Production now fails closed on unsafe/missing configuration.
 
 For local development, explicitly set `APP_ENV=development`, `TRUST_PROXY=false`, a randomly generated `SECRET_KEY` of at least 32 characters, and `TESTING_MODE=true` if console OTP delivery is needed. Real Shopify operations remain live.
 

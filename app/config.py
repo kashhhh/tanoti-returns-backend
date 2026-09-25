@@ -56,6 +56,9 @@ class Config:
     # Delhivery
     DELHIVERY_API_TOKEN = os.environ.get("DELHIVERY_API_TOKEN")
     DELHIVERY_PICKUP_LOCATION = os.environ.get("DELHIVERY_PICKUP_LOCATION")  # your registered warehouse name
+    DELHIVERY_ENVIRONMENT = os.environ.get("DELHIVERY_ENVIRONMENT", "staging")
+    DELHIVERY_SELLER_GST = os.environ.get("DELHIVERY_SELLER_GST", "")
+    DELHIVERY_HSN_CODE = os.environ.get("DELHIVERY_HSN_CODE", "")
 
     # OTP
     OTP_LENGTH = 6

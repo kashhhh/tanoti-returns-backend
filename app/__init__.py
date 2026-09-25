@@ -68,6 +68,11 @@ def create_app(config_class=Config):
         from app.services.notification_service import deliver_pending
         deliver_pending()
 
+    @app.cli.command("sync-delhivery")
+    def sync_delhivery():
+        from app.services.shipping_service import sync_tracking
+        sync_tracking()
+
     @app.cli.command("cleanup-photos")
     def cleanup_photos():
         from app.services.storage_service import cleanup_old_photos

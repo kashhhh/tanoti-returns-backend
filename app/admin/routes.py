@@ -62,6 +62,7 @@ def _row(obj, kind: str, repeat_flags=None) -> dict:
         "pickup_tracking_id": obj.pickup_tracking_id,
         "pickup_status": obj.pickup_status,
         "pickup_tracking_url": shipping_service.tracking_url(obj.pickup_carrier, obj.pickup_tracking_id),
+        "shipping_bookings": shipping_service.booking_details(obj.return_number if kind == "return" else obj.exchange_number),
         "parcel_received_at": obj.parcel_received_at.isoformat() if obj.parcel_received_at else None,
         "completed_at": obj.completed_at.isoformat() if obj.completed_at else None,
     }
@@ -121,6 +122,8 @@ def accept_photos(kind, number):
         return err
 
     req.photo_decision_at = datetime.utcnow()
+    # Save approval with the booking fence before any remote call can release the lock.
+    req.status = RequestStatus.PICKUP_SCHEDULED
 
     try:
         carrier, tracking_id, status = shipping_service.schedule_reverse_pickup(
@@ -217,6 +220,7 @@ def accept_parcel(kind, number):
         req.completed_at = datetime.utcnow() if req.refund_mode == RefundMode.GIFT_CARD else None
 
     else:  # exchange: ship the replacement item
+        req.status = RequestStatus.COMPLETED
         try:
             carrier, tracking_id, status = shipping_service.schedule_forward_shipment(
                 order=req.order_item.order,
@@ -406,6 +410,9 @@ def confirm_shipment(kind, number):
             or not isinstance(tracking, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", tracking)):
         return jsonify({"error": "Enter a carrier and valid tracking number"}), 400
     prefix = "outbound" if outbound else "pickup"
+    booking = shipping_service.booking_details(number).get(leg)
+    if booking and booking["state"] != "not_attempted":
+        return jsonify({"error": "An API booking already exists or may have succeeded. Use Verify Delhivery waybill instead."}), 409
     existing = getattr(req, prefix + "_tracking_id")
     if existing:
         if existing == tracking and getattr(req, prefix + "_carrier") == carrier.strip().lower():
@@ -415,6 +422,74 @@ def confirm_shipment(kind, number):
     setattr(req, prefix + "_tracking_id", tracking)
     setattr(req, prefix + "_status", "scheduled")
     queue_update(req, kind, "replacement_booked" if outbound else "pickup_booked")
+    db.session.commit()
+    deliver_pending(limit=1)
+    return jsonify(_row(req, kind))
+
+
+@admin_bp.post("/requests/<kind>/<number>/book-shipment")
+@admin_bp.post("/requests/<kind>/<number>/reconcile-shipment")
+@admin_required
+def recover_shipment(kind, number):
+    req = _find_request(kind, number)
+    if not req:
+        return jsonify({"error": "Not found"}), 404
+    data = request.get_json(silent=True) or {}
+    leg = data.get("leg")
+    if leg not in ("pickup", "replacement") or (leg == "replacement" and kind != "exchange"):
+        return jsonify({"error": "Invalid shipment leg"}), 400
+    outbound = leg == "replacement"
+    expected = RequestStatus.COMPLETED if outbound else RequestStatus.PICKUP_SCHEDULED
+    if req.status != expected or (outbound and req.delivered_at):
+        return jsonify({"error": "This request is not awaiting this shipment"}), 409
+    booking = shipping_service.booking_details(number).get(leg)
+    if not booking:
+        return jsonify({"error": "No recoverable API attempt exists. Check earlier bookings in Delhivery One."}), 409
+    prefix = "outbound" if outbound else "pickup"
+    existing = getattr(req, prefix + "_tracking_id")
+    if existing:
+        return jsonify(_row(req, kind))
+    try:
+        if request.path.endswith("/reconcile-shipment"):
+            carrier, waybill, status = shipping_service.reconcile(number, leg, data.get("waybill", ""))
+        elif booking["state"] not in ("not_attempted", "confirmed"):
+            return jsonify({"error": "The previous attempt is uncertain. Verify its waybill instead of retrying."}), 409
+        elif outbound:
+            variant = shopify_client.select_exchange_variant(req.order_item, req.requested_size)
+            if variant["id"] != req.requested_variant_id:
+                return jsonify({"error": "Replacement variant changed. Review the request before booking."}), 409
+            carrier, waybill, status = shipping_service.schedule_forward_shipment(order=req.order_item.order,
+                item=req.order_item, requested_size=req.requested_size, request_number=number)
+        else:
+            carrier, waybill, status = shipping_service.schedule_reverse_pickup(order=req.order_item.order,
+                item=req.order_item, request_number=number, pickup_address=req.pickup_address)
+    except ValueError as exc:
+        db.session.rollback()
+        return jsonify({"error": str(exc)}), 409 if isinstance(exc, shipping_service.BookingUncertain) else 400
+    except Exception:
+        db.session.rollback()
+        return jsonify({"error": "Could not verify or book the shipment. Refresh the request before proceeding."}), 503
+    req = _find_request(kind, number)
+    setattr(req, prefix + "_carrier", carrier)
+    setattr(req, prefix + "_tracking_id", waybill)
+    setattr(req, prefix + "_status", status)
+    queue_update(req, kind, "replacement_booked" if outbound else "pickup_booked")
+    db.session.commit()
+    deliver_pending(limit=1)
+    return jsonify(_row(req, kind))
+
+
+@admin_bp.post("/requests/<kind>/<number>/refresh-tracking")
+@admin_required
+def refresh_tracking(kind, number):
+    req = _find_request(kind, number)
+    if not req:
+        return jsonify({"error": "Not found"}), 404
+    try:
+        shipping_service.refresh_tracking(req, kind)
+    except Exception:
+        db.session.rollback()
+        return jsonify({"error": "Delhivery tracking is unavailable. Existing shipment details have been kept."}), 503
     db.session.commit()
     deliver_pending(limit=1)
     return jsonify(_row(req, kind))

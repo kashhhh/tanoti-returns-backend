@@ -1,0 +1,10 @@
+[Unit]
+Description=Refresh Tanoti Delhivery tracking every 15 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=15min
+Unit=tanoti-delhivery.service
+
+[Install]
+WantedBy=timers.target
