@@ -197,6 +197,8 @@ def _metadata(req, kind):
 
 def sync_one(req, kind):
     """Call only after business-state commit. Failure remains visible and retryable."""
+    if not current_app.config.get("SHOPIFY_RETURNS_SYNC_ENABLED"):
+        return req
     model = ReturnRequest if kind == "return" else ExchangeRequest
     ident = req.id
     req = model.query.filter_by(id=ident).with_for_update().populate_existing().one()
@@ -244,6 +246,8 @@ def sync_one(req, kind):
 
 
 def retry_pending(limit=50):
+    if not current_app.config.get("SHOPIFY_RETURNS_SYNC_ENABLED"):
+        return
     for model, kind in ((ReturnRequest,"return"),(ExchangeRequest,"exchange")):
         ids = [r.id for r in model.query.filter(model.shopify_sync_status != "synced").order_by(model.id).limit(limit)]
         for ident in ids:

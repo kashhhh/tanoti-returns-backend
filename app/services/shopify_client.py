@@ -104,10 +104,29 @@ def fetch_order(order_id: str):
     return resp.json()["order"]
 
 
-def fetch_gift_card(card_id: str):
-    resp = requests.get(f"{_base_url()}/gift_cards/{card_id}.json", headers=_headers(), timeout=10)
+def find_order_for_login(identifier):
+    """Exact order name/number match; never accept a fuzzy Shopify search hit."""
+    resp = requests.get(f"{_base_url()}/orders.json", headers=_headers(),
+                        params={"status": "any", "name": identifier, "limit": 250}, timeout=10)
     resp.raise_for_status()
-    return resp.json()["gift_card"]
+    matches = [o for o in resp.json().get("orders", [])
+               if identifier.casefold() in (str(o.get("name", "")).lstrip("#").casefold(), str(o.get("order_number", "")))]
+    if len(matches) == 1:
+        return matches[0]
+    if not matches and identifier.isdigit():
+        resp = requests.get(f"{_base_url()}/orders/{identifier}.json", headers=_headers(), timeout=10)
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        order = resp.json().get("order")
+        return order if order and str(order["id"]) == identifier else None
+    return None
+
+
+def fetch_gift_card(card_id: str):
+    result = graphql('query($id: ID!) { giftCard(id: $id) { ' + GIFT_CARD_FIELDS + ' } }',
+                     {"id": f"gid://shopify/GiftCard/{card_id}"})
+    return _gift_card_payload(result.get("giftCard"))
 
 
 def fetch_orders_for_customer(shopify_customer_id: str):
@@ -122,7 +141,7 @@ def fetch_orders_for_customer(shopify_customer_id: str):
     resp.raise_for_status()
     return resp.json().get("orders", [])
 
-def get_product_image_url(shopify_product_id: str):
+def get_product_image_url(shopify_product_id: str, variant_id=None):
     """Order line items don't include image data in Shopify's REST API --
     the image has to be fetched separately from the product. Used by
     sync_service to fill in OrderItem.image_url."""
@@ -132,12 +151,17 @@ def get_product_image_url(shopify_product_id: str):
     resp = requests.get(
         f"{_base_url()}/products/{shopify_product_id}.json",
         headers=_headers(),
-        params={"fields": "image"},
+        params={"fields": "image,images,variants"},
         timeout=10,
     )
     if not resp.ok:
         return None  # don't fail the whole sync over one missing/deleted product
-    image = (resp.json().get("product") or {}).get("image") or {}
+    product = resp.json().get("product") or {}
+    images = product.get("images") or []
+    variant = next((v for v in product.get("variants", []) if str(v["id"]) == str(variant_id)), {})
+    image = next((i for i in images if variant.get("image_id") and str(i["id"]) == str(variant["image_id"])), None)
+    image = image or next((i for i in images if str(variant_id) in [str(v) for v in i.get("variant_ids", [])]), None)
+    image = image or product.get("image") or {}
     return image.get("src")
 
 def get_variants_for_product(shopify_product_id: str, original_variant_id=None):
@@ -158,25 +182,34 @@ def get_variants_for_product(shopify_product_id: str, original_variant_id=None):
 
 
 def issue_gift_card(amount: str, note: str = "", *, code: str):
-    """Creates a Shopify gift card for the given amount (as a decimal
-    string, e.g. '1499.00') and returns its code + admin GID.
-    Called when the owner accepts a return with refund_mode = gift_card.
-    """
-    payload = {
-        "gift_card": {
-            "initial_value": amount,
-            "note": note,
-            "code": code,
-        }
-    }
-    resp = requests.post(
-        f"{_base_url()}/gift_cards.json",
-        headers=_headers(),
-        json=payload,
-        timeout=10,
-    )
-    resp.raise_for_status()
-    return resp.json()["gift_card"]
+    """Preflight before any financial mutation; return Shopify's actual code."""
+    try:
+        info = graphql('query { shop { currencyCode } currentAppInstallation { accessScopes { handle } } }', {})
+    except Exception as exc:
+        raise ShopifyUserError("Could not check Shopify gift card access. No card was created; please retry.") from exc
+    scopes = {s["handle"] for s in info["currentAppInstallation"]["accessScopes"]}
+    if "write_gift_cards" not in scopes:
+        raise ShopifyUserError("Shopify requires write_gift_cards permission. Update and reinstall the app before retrying.")
+    currency = info["shop"]["currencyCode"]
+    if currency != current_app.config["SHOP_CURRENCY"]:
+        raise ShopifyUserError(f"Shopify store currency is {currency}, but the returns app expects {current_app.config['SHOP_CURRENCY']}. Check the configured store and currency before issuing a card. No card was created.")
+    result = mutation('mutation($input: GiftCardCreateInput!) { giftCardCreate(input: $input) { giftCard { '
+                      + GIFT_CARD_FIELDS + ' } giftCardCode userErrors { field message } } }',
+                      {"input": {"initialValue": amount, "note": note, "code": code}}, "giftCardCreate")
+    card = _gift_card_payload(result.get("giftCard"))
+    card["code"] = result.get("giftCardCode")
+    return card
+
+
+GIFT_CARD_FIELDS = "id note initialValue { amount currencyCode } lastCharacters enabled"
+
+
+def _gift_card_payload(card):
+    if not card:
+        raise ValueError("Shopify gift card was not found")
+    return {"id": card["id"].rsplit("/", 1)[-1], "note": card.get("note"),
+            "initial_value": card["initialValue"]["amount"], "currency": card["initialValue"]["currencyCode"],
+            "last_characters": card["lastCharacters"], "disabled_at": None if card["enabled"] else "disabled"}
 
 
 def select_exchange_variant(item, size):

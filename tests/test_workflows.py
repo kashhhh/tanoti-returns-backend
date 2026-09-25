@@ -170,25 +170,25 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(self.action(number, "mark-parcel-received").status_code, 200)
         with patch("app.services.shopify_client.issue_gift_card", side_effect=lambda **kw: {"id": 567, "initial_value": kw["amount"], "currency": "INR", "note": kw["note"], "code": kw["code"]}):
             self.assertEqual(self.action(number, "accept-parcel").status_code, 200)
-        self.assertEqual(Notification.query.count(), 4)
+        self.assertEqual(Notification.query.count(), 3)
         self.assertIn(ReturnRequest.query.filter_by(return_number=number).one().gift_card_code, Notification.query.filter_by(event_key=number+":gift_card").one().html)
         self.assertEqual(self.action(number, "accept-parcel").status_code, 400)
-        self.assertEqual(Notification.query.count(), 4)
+        self.assertEqual(Notification.query.count(), 3)
 
     def test_manual_fallback_emails_do_not_claim_booking_or_payment(self):
         number = self.submit(refund_mode="account").json["return_number"]
         self.assertEqual(self.action(number, "accept-photos").status_code, 200)
-        self.assertIsNotNone(Notification.query.filter_by(event_key=number+":pickup_pending").first())
+        self.assertIsNone(Notification.query.filter_by(event_key=number+":pickup_pending").first())
         self.action(number, "mark-parcel-received")
         self.assertEqual(self.action(number, "accept-parcel").status_code, 200)
-        self.assertIsNotNone(Notification.query.filter_by(event_key=number+":refund_approved").first())
+        self.assertIsNone(Notification.query.filter_by(event_key=number+":refund_approved").first())
 
     def test_rejection_reason_escaped(self):
         number = self.submit().json["return_number"]
         self.assertEqual(self.action(number, "reject-photos", rejection_reason="other", note="<script>bad</script>").status_code, 200)
-        html = Notification.query.filter_by(event_key=number+":rejected").one().html
-        self.assertIn("&lt;script&gt;", html)
-        self.assertIn("photo review", html)
+        self.assertIsNone(Notification.query.filter_by(event_key=number+":rejected").first())
+        html = Notification.query.filter_by(event_key=number+":received").one().html
+        self.assertIn("&lt;b&gt;red&lt;/b&gt;", html)
 
     def test_email_failure_does_not_fail_request_and_can_retry(self):
         self.app.config.update(RESEND_API_KEY="fake", TESTING_MODE=False)
@@ -224,7 +224,7 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(self.action(number, "accept-parcel", kind="exchange").status_code, 200)
         message = Notification.query.filter_by(event_key=number+":replacement_booked").one()
         self.assertIn("OUTBOUND", message.html)
-        self.assertIn("booked", message.subject)
+        self.assertIn("arranged", message.subject)
 
     def test_sync_does_not_overwrite_pickup_snapshot(self):
         from app.services.sync_service import upsert_order

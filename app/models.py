@@ -362,6 +362,7 @@ class OTPToken(db.Model):
     __tablename__ = "otp_tokens"
 
     id = db.Column(db.Integer, primary_key=True)
+    challenge = db.Column(db.String(43), unique=True, index=True)
     email = db.Column(db.String(255), nullable=False, index=True)
     otp_hash = db.Column(db.String(128), nullable=False)
     expires_at = db.Column(db.DateTime, nullable=False)

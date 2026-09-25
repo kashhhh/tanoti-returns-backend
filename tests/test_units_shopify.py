@@ -114,6 +114,7 @@ class UnitAndShopifyTests(unittest.TestCase):
         self.assertEqual(ReturnRequest.query.count()+ExchangeRequest.query.count(),1)
 
     def make_request(self, kind="return"):
+        self.app.config["SHOPIFY_RETURNS_SYNC_ENABLED"] = True
         self.submit(kind)
         obj=(ReturnRequest if kind=="return" else ExchangeRequest).query.one()
         self.app.config["SHOPIFY_STORE_DOMAIN"]="sample.myshopify.com"

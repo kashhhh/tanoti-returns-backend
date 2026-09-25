@@ -1,3 +1,5 @@
+> This document describes the retained legacy integration. Native return/restock sync is disabled and its admin controls are removed. See [FEATURE_UPDATE.md](FEATURE_UPDATE.md) for current behavior and deployment instructions.
+
 # Unit cards and Shopify record synchronization
 
 ## Behavior

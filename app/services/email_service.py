@@ -3,6 +3,7 @@ Resend wrapper. Install with: pip install resend
 """
 import resend
 from flask import current_app
+from app.services.email_templates import login_email
 
 
 def _configure():
@@ -25,10 +26,7 @@ def send_otp_email(to_email: str, otp_code: str):
         "from": current_app.config["EMAIL_FROM"],
         "to": [to_email],
         "subject": "Your Tanoti returns login code",
-        "html": (
-            f"<p>Your one-time code is <strong>{otp_code}</strong>. "
-            f"It expires in {current_app.config['OTP_EXPIRY_MINUTES']} minutes.</p>"
-        ),
+        "html": login_email(otp_code, current_app.config['OTP_EXPIRY_MINUTES']),
     })
 
 
@@ -74,5 +72,5 @@ def send_admin_otp_email(to_email, code):
     _configure()
     resend.Emails.send({"from": current_app.config["EMAIL_FROM"], "to": [to_email],
                         "subject": "Your Tanoti admin login code",
-                        "html": f"<p>Your admin login code is <strong>{code}</strong>. It expires in 10 minutes.</p>"})
+                        "html": login_email(code, 10, admin=True)})
     return "email"

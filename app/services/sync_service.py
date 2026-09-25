@@ -82,6 +82,7 @@ def upsert_order(shopify_order: dict, _image_cache: dict = None, *, commit=True)
     order = Order.query.filter_by(shopify_order_id=order_id).with_for_update().first()
     incoming_at = _utc(shopify_order["updated_at"]) if shopify_order.get("updated_at") else None
     if order and order.shopify_updated_at and (not incoming_at or incoming_at <= order.shopify_updated_at):
+        refresh_item_images(order.items, _image_cache)
         if commit:
             db.session.commit()
         return order
@@ -157,9 +158,7 @@ def upsert_order(shopify_order: dict, _image_cache: dict = None, *, commit=True)
             item.unavailable = bool(shopify_order.get("cancelled_at")) or refunded > 0 or (mapping_pending and (not existing or item.unavailable))
             product_id = item.shopify_product_id
             if product_id:
-                if product_id not in _image_cache:
-                    _image_cache[product_id] = shopify_client.get_product_image_url(product_id)
-                item.image_url = _image_cache[product_id]
+                refresh_item_images([item], _image_cache)
         for unit, item in existing.items():
             if unit > count:
                 item.unavailable = True
@@ -185,3 +184,17 @@ def sync_orders_for_customer(shopify_customer_id: str):
     image_cache = {}
     for o in orders:
         upsert_order(o, _image_cache=image_cache)
+
+
+def refresh_item_images(items, cache=None):
+    """Refresh legacy images too, even when the Shopify order has not changed."""
+    from app.services import shopify_client
+    cache = {} if cache is None else cache
+    for item in items:
+        if not item.shopify_product_id:
+            continue
+        key = (item.shopify_product_id, item.shopify_variant_id)
+        if key not in cache:
+            cache[key] = shopify_client.get_product_image_url(*key)
+        if cache[key]:
+            item.image_url = cache[key]

@@ -40,6 +40,7 @@ class MigrationTest(unittest.TestCase):
                     for table in ("auth_sessions", "webhook_receipts", "gift_card_issuances", "admin_audit"):
                         self.assertIn(table, inspect(db.engine).get_table_names())
                     self.assertIn("shopify_updated_at", {c["name"] for c in inspect(db.engine).get_columns("orders")})
+                    self.assertIn("challenge", {c["name"] for c in inspect(db.engine).get_columns("otp_tokens")})
                 finally:
                     db.session.remove()
                     db.engine.dispose()

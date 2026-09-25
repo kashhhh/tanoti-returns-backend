@@ -32,9 +32,11 @@ def _email(data):
     return email
 
 
-def _sent_response():
+def _sent_response(token=None):
     delivery = "console" if current_app.config.get("TESTING_MODE") else "email"
-    return jsonify({"message": "If this email is eligible, a code has been sent.",
+    challenge = token.challenge if token else secrets.token_urlsafe(32)
+    return jsonify({"message": "If these details match an account, a code has been sent to its email.",
+                    "challenge": challenge,
                     "delivery": delivery, "expires_in_minutes": current_app.config["OTP_EXPIRY_MINUTES"]})
 
 
@@ -46,7 +48,26 @@ def _generate_otp() -> str:
 @auth_bp.route("/request-otp", methods=["POST"])
 @auth_bp.route("/resend-otp", methods=["POST"])
 def request_otp():
-    email = _email(request.get_json(silent=True))
+    data = request.get_json(silent=True)
+    email = _email(data)
+    shopify_customer = None
+    order_id = data.get("order_id") if isinstance(data, dict) else None
+    if order_id is not None:
+        if email or not isinstance(order_id, str) or not re.fullmatch(r"#?[A-Za-z0-9][A-Za-z0-9_-]{0,63}", order_id.strip()):
+            return jsonify({"error": "Enter a valid order ID or email address"}), 400
+        order_id = order_id.strip().lstrip("#")
+        blocked = limited("customer-order-send", order_id.lower(), 5, 900)
+        if blocked is not None:
+            return blocked
+        try:
+            order = shopify_client.find_order_for_login(order_id)
+        except Exception:
+            return jsonify({"error": "Login is temporarily unavailable. Please try again shortly."}), 503
+        shopify_customer = (order or {}).get("customer")
+        email = _email({"email": (order or {}).get("email")})
+        # Never grant account-wide access to a different order contact address.
+        if not shopify_customer or not email or email != _email(shopify_customer):
+            return _sent_response()
     if not email:
         return jsonify({"error": "Enter a valid email address"}), 400
     blocked = limited("customer-send", email, 5, 900)
@@ -61,7 +82,7 @@ def request_otp():
     # Validate the email actually belongs to a real Tanoti customer before
     # sending anything -- decided requirement.
     try:
-        shopify_customer = shopify_client.find_customer_by_email(email)
+        shopify_customer = shopify_customer or shopify_client.find_customer_by_email(email)
     except Exception:
         current_app.logger.warning("Customer lookup unavailable")
         return jsonify({"error": "Login is temporarily unavailable. Please try again shortly."}), 503
@@ -80,6 +101,7 @@ def request_otp():
     otp = _generate_otp()
     token = OTPToken(
         email=email,
+        challenge=secrets.token_urlsafe(32),
         otp_hash=_hash_otp(otp),
         expires_at=datetime.utcnow() + timedelta(minutes=current_app.config["OTP_EXPIRY_MINUTES"]),
     )
@@ -93,13 +115,21 @@ def request_otp():
         db.session.commit()
         current_app.logger.warning("Customer OTP delivery failed")
         return jsonify({"error": "Could not send the code. Please try again shortly."}), 503
-    return _sent_response()
+    return _sent_response(token)
 
 
 @auth_bp.route("/verify-otp", methods=["POST"])
 def verify_otp():
     data = request.get_json(silent=True)
     email = _email(data)
+    challenge_token = None
+    if isinstance(data, dict) and "challenge" in data:
+        challenge = data["challenge"]
+        if isinstance(challenge, str) and re.fullmatch(r"[A-Za-z0-9_-]{43}", challenge):
+            challenge_token = OTPToken.query.filter_by(challenge=challenge).first()
+        if not challenge_token:
+            return jsonify({"error": "Code invalid or expired. Please request a new one."}), 400
+        email = challenge_token.email
     otp = data.get("otp", "") if isinstance(data, dict) else ""
     if not email or not isinstance(otp, str) or not re.fullmatch(r"[0-9]{6}", otp.strip()):
         return jsonify({"error": "Enter a valid email and six-digit code"}), 400
@@ -110,9 +140,10 @@ def verify_otp():
         OTPToken.query.filter_by(email=email)
         .order_by(OTPToken.id.desc())
         .with_for_update()
+        .populate_existing()
         .first()
     )
-    if not token or token.consumed or datetime.utcnow() >= token.expires_at:
+    if not token or (challenge_token and challenge_token.id != token.id) or token.consumed or datetime.utcnow() >= token.expires_at:
         return jsonify({"error": "Code invalid or expired. Please request a new one."}), 400
 
     if token.attempts >= current_app.config["OTP_MAX_VERIFY_ATTEMPTS"]:
@@ -132,6 +163,11 @@ def verify_otp():
     # (Subsequent syncs happen via webhooks + the manual /resync endpoint.)
     if not customer.orders or any(not order.shipping_address for order in customer.orders):
         sync_service.sync_orders_for_customer(customer.shopify_customer_id)
+    else:
+        try:
+            sync_service.refresh_item_images([item for order in customer.orders for item in order.items])
+        except Exception:
+            current_app.logger.warning("Variant image refresh unavailable")
 
     raw = create_session("customer", customer.id, customer.email)
     db.session.commit()

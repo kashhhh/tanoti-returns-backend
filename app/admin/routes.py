@@ -183,11 +183,12 @@ def accept_parcel(kind, number):
     if err:
         return err
 
-    choice = (request.get_json(silent=True) or {}).get("restock")
+    choice = (request.get_json(silent=True) or {}).get("restock", False)
     if not isinstance(choice, bool):
         return jsonify({"error": "Choose whether the inspected item should be restocked"}), 400
     if kind == "return" and req.refund_mode == RefundMode.GIFT_CARD:
-        if db.session.get(GiftCardIssuance, req.id) or req.gift_card_code or req.parcel_decision_at:
+        attempt = db.session.get(GiftCardIssuance, req.id)
+        if (attempt and attempt.state != "rejected") or req.gift_card_code or req.parcel_decision_at:
             return jsonify({"error": "A gift card may already exist. Reconcile the existing issuance before proceeding."}), 409
     req.restock = choice
     if kind == "exchange":
@@ -294,7 +295,8 @@ def reject_parcel(kind, number):
 
 
 def _reject(req, kind, number, stage: str):
-    if kind == "return" and (db.session.get(GiftCardIssuance, req.id) or req.gift_card_code
+    attempt = db.session.get(GiftCardIssuance, req.id) if kind == "return" else None
+    if kind == "return" and ((attempt and attempt.state != "rejected") or req.gift_card_code
                               or (req.refund_mode == RefundMode.GIFT_CARD and req.parcel_decision_at)):
         return jsonify({"error": "A gift card may already exist. Reconcile it before changing this refund."}), 409
     data = request.json or {}
@@ -367,6 +369,8 @@ def mark_delivered(number):
 @admin_bp.post("/requests/<kind>/<number>/sync-shopify")
 @admin_required
 def sync_shopify(kind, number):
+    if not current_app.config.get("SHOPIFY_RETURNS_SYNC_ENABLED"):
+        return jsonify({"error": "Shopify return/restock sync is disabled. Order imports and gift cards remain active."}), 410
     req = _find_request(kind, number)
     if not req:
         return jsonify({"error": "Not found"}), 404
@@ -378,6 +382,41 @@ def sync_shopify(kind, number):
         req.restock = data["restock"]
     db.session.commit()
     sync_one(req, kind)
+    return jsonify(_row(req, kind))
+
+
+@admin_bp.post("/requests/<kind>/<number>/confirm-shipment")
+@admin_required
+def confirm_shipment(kind, number):
+    """Record a manually booked shipment and send its milestone once."""
+    req = _find_request(kind, number)
+    if not req:
+        return jsonify({"error": "Not found"}), 404
+    data = request.get_json(silent=True) or {}
+    leg = data.get("leg")
+    outbound = leg == "replacement"
+    if leg not in ("pickup", "replacement") or (outbound and kind != "exchange"):
+        return jsonify({"error": "Choose a pickup or replacement shipment"}), 400
+    expected = RequestStatus.COMPLETED if outbound else RequestStatus.PICKUP_SCHEDULED
+    if req.status != expected or (outbound and req.delivered_at):
+        return jsonify({"error": "This request is not awaiting this shipment"}), 409
+    carrier, tracking = data.get("carrier"), data.get("tracking_id")
+    import re
+    if (not isinstance(carrier, str) or not 1 <= len(carrier.strip()) <= 32
+            or not isinstance(tracking, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", tracking)):
+        return jsonify({"error": "Enter a carrier and valid tracking number"}), 400
+    prefix = "outbound" if outbound else "pickup"
+    existing = getattr(req, prefix + "_tracking_id")
+    if existing:
+        if existing == tracking and getattr(req, prefix + "_carrier") == carrier.strip().lower():
+            return jsonify(_row(req, kind))
+        return jsonify({"error": "A shipment is already recorded for this request"}), 409
+    setattr(req, prefix + "_carrier", carrier.strip().lower())
+    setattr(req, prefix + "_tracking_id", tracking)
+    setattr(req, prefix + "_status", "scheduled")
+    queue_update(req, kind, "replacement_booked" if outbound else "pickup_booked")
+    db.session.commit()
+    deliver_pending(limit=1)
     return jsonify(_row(req, kind))
 
 

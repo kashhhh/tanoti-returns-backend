@@ -63,7 +63,10 @@ class SecurityTests(unittest.TestCase):
         with patch("app.auth.routes.shopify_client.find_customer_by_email", return_value={"id": "100"}), \
                 patch("app.auth.routes.email_service.send_otp_email"):
             existing = self.client.post("/api/auth/request-otp", json={"email": "customer@example.com"})
-        self.assertEqual((missing.status_code, missing.json), (existing.status_code, existing.json))
+        missing_data, existing_data = missing.json, existing.json
+        self.assertEqual(len(missing_data.pop("challenge")), 43)
+        self.assertEqual(len(existing_data.pop("challenge")), 43)
+        self.assertEqual((missing.status_code, missing_data), (existing.status_code, existing_data))
 
     def test_bad_login_inputs_and_query_injection(self):
         with patch("app.auth.routes.shopify_client.find_customer_by_email") as lookup:

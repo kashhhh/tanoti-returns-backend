@@ -48,12 +48,14 @@ def confirm(attempt, req, card, *, creating=False):
 
 
 def issue_once(req):
-    if db.session.get(GiftCardIssuance, req.id) or req.gift_card_code:
+    attempt = db.session.get(GiftCardIssuance, req.id)
+    if (attempt and attempt.state != "rejected") or req.gift_card_code:
         raise IssuanceUncertain("This refund already has an issuance attempt. Reconcile it in Shopify.")
     if req.net_refund_amount <= 0:
         raise ValueError("A gift card requires a positive refund amount")
-    attempt = GiftCardIssuance(return_id=req.id, code=secrets.token_hex(10).upper(),
-                               amount=req.net_refund_amount, requested_by=g.admin_email, state="pending")
+    attempt = attempt or GiftCardIssuance(return_id=req.id, code=secrets.token_hex(10).upper(),
+                               amount=req.net_refund_amount, requested_by=g.admin_email)
+    attempt.state = "pending"
     db.session.add(attempt)
     record_admin_action("gift_card_attempted", req.return_number)
     # Commit the fence BEFORE contacting Shopify. A crash or timeout must not
@@ -68,6 +70,13 @@ def issue_once(req):
         db.session.refresh(attempt)
         if attempt.state != "confirmed":
             confirm(attempt, req, card, creating=True)
+    except shopify_client.ShopifyUserError as exc:
+        db.session.rollback()
+        attempt.state = "rejected"
+        req.parcel_decision_at = None
+        record_admin_action("gift_card_rejected_by_provider", req.return_number)
+        db.session.commit()
+        raise ValueError(str(exc).replace(attempt.code, "[card code]")) from exc
     except Exception as exc:
         db.session.rollback()
         # Do not overwrite a simultaneous reconciliation's confirmed state.

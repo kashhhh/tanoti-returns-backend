@@ -34,6 +34,9 @@ class Config:
     SHOPIFY_STORE_DOMAIN = os.environ.get("SHOPIFY_STORE_DOMAIN")     # e.g. tanoti-official.myshopify.com
     SHOPIFY_CLIENT_ID = os.environ.get("SHOPIFY_CLIENT_ID")
     SHOPIFY_CLIENT_SECRET = os.environ.get("SHOPIFY_CLIENT_SECRET")
+    SHOPIFY_ADMIN_API_TOKEN = os.environ.get("SHOPIFY_ADMIN_API_TOKEN")
+    # Native return records/restocking are optional; order imports and cards are independent.
+    SHOPIFY_RETURNS_SYNC_ENABLED = False
     SHOPIFY_API_VERSION = os.environ.get("SHOPIFY_API_VERSION", "2026-07")
     SHOPIFY_WEBHOOK_SECRET = os.environ.get("SHOPIFY_WEBHOOK_SECRET")
 
