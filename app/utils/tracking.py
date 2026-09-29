@@ -40,6 +40,11 @@ def build_timeline(obj, kind: str):
         "tracking_url": shipping_service.tracking_url(obj.pickup_carrier, obj.pickup_tracking_id),
     })
 
+    if (obj.pickup_status or "").lower() in ("cancelled", "canceled") and obj.parcel_received_at is None:
+        steps.append({"label": "Pickup cancelled", "date": None, "done": True,
+                      "note": "Your request remains open. Our team will contact you about the next step."})
+        return steps
+
     steps.append({
         "label": "Parcel received & being inspected",
         "date": obj.parcel_received_at.isoformat() if obj.parcel_received_at else None,
@@ -56,12 +61,21 @@ def build_timeline(obj, kind: str):
         return steps
 
     if kind == "return":
+        if obj.status == "completed" and obj.net_refund_amount == 0:
+            steps.append({"label": "Return complete — no refund due", "done": True,
+                          "date": obj.completed_at.isoformat() if obj.completed_at else None,
+                          "note": "No amount remains after discounts and the return deduction. No payment or gift card was issued."})
+            return steps
         steps.append({
             "label": "Gift card issued" if obj.refund_mode == "gift_card" else "Refund approved",
             "date": obj.parcel_decision_at.isoformat() if obj.parcel_decision_at else None,
             "done": obj.status == "completed",
         })
     else:
+        if (obj.outbound_status or "").lower() in ("returned", "cancelled", "canceled") and not obj.delivered_at:
+            steps.append({"label": "Replacement shipment cancelled or returned", "date": None, "done": True,
+                          "note": "Your exchange remains open. Our team will contact you about the next step."})
+            return steps
         steps.append({
             "label": "Replacement shipment" if obj.delivered_at else "Replacement shipment booked" if obj.outbound_tracking_id else "Replacement being arranged",
             "date": obj.parcel_decision_at.isoformat() if obj.parcel_decision_at else None,

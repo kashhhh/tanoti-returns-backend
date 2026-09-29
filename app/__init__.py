@@ -1,4 +1,4 @@
-from flask import Flask, send_from_directory, abort
+from flask import Flask, send_from_directory, abort, jsonify, request
 from flask_cors import CORS
 
 from app.config import Config
@@ -8,6 +8,13 @@ from app.extensions import db, migrate
 def create_app(config_class=Config):
     app = Flask(__name__)
     app.config.from_object(config_class)
+
+    @app.errorhandler(413)
+    def request_too_large(error):
+        message = "Request is too large. Please reduce its size and try again."
+        if request.mimetype == "multipart/form-data":
+            message = "Your photos are too large to upload. Choose smaller photos (up to 10 MB each) and try again."
+        return jsonify(error=message), 413
 
     db.init_app(app)
     migrate.init_app(app, db)

@@ -9,6 +9,7 @@ from app.models import (
 )
 from app.utils.admin_auth import admin_required
 from app.services import shopify_client, shipping_service
+from app.services import refund_service
 from app.services.notification_service import queue_update, deliver_pending
 
 from app.utils.request_status import stage_for
@@ -31,7 +32,9 @@ def _repeat_returner_flag(customer_id: int) -> bool:
 
 
 def _row(obj, kind: str, repeat_flags=None) -> dict:
+    from app.services.attention_service import reasons_for
     row = {
+        "attention_reasons": reasons_for(obj, kind),
         "type": kind,
         "number": obj.return_number if kind == "return" else obj.exchange_number,
         "date": obj.created_at.isoformat(),
@@ -70,6 +73,10 @@ def _row(obj, kind: str, repeat_flags=None) -> dict:
         row["photo_urls"] = obj.photo_urls or []
         row["refund_mode"] = obj.refund_mode.value
         row["net_refund_amount"] = str(obj.net_refund_amount)
+        row["refund_amount"] = str(obj.refund_amount)
+        row["deduction_applied"] = str(obj.deduction_applied)
+        row["refund_breakdown"] = obj.refund_breakdown
+        row["refund_review_error"] = obj.refund_review_error
         row["gift_card_code"] = obj.gift_card_code
         issuance = db.session.get(GiftCardIssuance, obj.id)
         row["gift_card_issuance_state"] = issuance.state if issuance else ("legacy_review" if obj.refund_mode == RefundMode.GIFT_CARD and obj.parcel_decision_at and not obj.gift_card_code else None)
@@ -194,6 +201,13 @@ def accept_parcel(kind, number):
         if (attempt and attempt.state != "rejected") or req.gift_card_code or req.parcel_decision_at:
             return jsonify({"error": "A gift card may already exist. Reconcile the existing issuance before proceeding."}), 409
     req.restock = choice
+    if kind == "return":
+        try:
+            refund_service.verify_request(req)
+        except ValueError as exc:
+            req.refund_review_error = str(exc)
+            db.session.commit()
+            return jsonify({"error": str(exc), "refund_review_required": True}), 409
     if kind == "exchange":
         try:
             variant = shopify_client.select_exchange_variant(req.order_item, req.requested_size)
@@ -207,7 +221,7 @@ def accept_parcel(kind, number):
     req.parcel_decision_at = datetime.utcnow()
 
     if kind == "return":
-        if req.refund_mode == RefundMode.GIFT_CARD:
+        if req.refund_mode == RefundMode.GIFT_CARD and req.net_refund_amount > 0:
             from app.services.gift_card_service import issue_once, IssuanceUncertain
             try:
                 issue_once(req)
@@ -217,7 +231,7 @@ def accept_parcel(kind, number):
                 db.session.rollback()
                 return jsonify({"error": str(exc)}), 400
         req.status = RequestStatus.COMPLETED
-        req.completed_at = datetime.utcnow() if req.refund_mode == RefundMode.GIFT_CARD else None
+        req.completed_at = datetime.utcnow() if req.refund_mode == RefundMode.GIFT_CARD or req.net_refund_amount == 0 else None
 
     else:  # exchange: ship the replacement item
         req.status = RequestStatus.COMPLETED
@@ -238,7 +252,7 @@ def accept_parcel(kind, number):
         req.completed_at = None
 
     if kind == "return":
-        event = "gift_card" if req.refund_mode == RefundMode.GIFT_CARD else "refund_approved"
+        event = "no_refund_due" if req.net_refund_amount == 0 else "gift_card" if req.refund_mode == RefundMode.GIFT_CARD else "refund_approved"
     else:
         event = "replacement_booked" if req.outbound_tracking_id else "replacement_pending"
     queue_update(req, kind, event)
@@ -332,7 +346,7 @@ def mark_refund_paid(number):
     req = ReturnRequest.query.filter_by(return_number=number).with_for_update().first()
     if not req:
         return jsonify({"error": "Request not found"}), 404
-    if req.status != RequestStatus.COMPLETED or req.refund_mode != RefundMode.ACCOUNT or req.gift_card_code:
+    if req.status != RequestStatus.COMPLETED or req.refund_mode != RefundMode.ACCOUNT or req.gift_card_code or req.net_refund_amount <= 0:
         return jsonify({"error": "Only an approved manual refund can be marked paid"}), 400
     if req.refund_paid_at:
         return jsonify(_row(req, "return"))
@@ -346,6 +360,34 @@ def mark_refund_paid(number):
     return jsonify(_row(req, "return"))
 
 
+@admin_bp.route("/requests/return/<number>/review-refund", methods=["GET", "POST"])
+@admin_required
+def review_refund(number):
+    from app.utils.audit import record_admin_action
+    req = _find_request("return", number)
+    if not req:
+        return jsonify(error="Request not found"), 404
+    if req.status == RequestStatus.REJECTED:
+        return jsonify(error="A rejected request cannot be revalued"), 409
+    try:
+        refund_service.can_revalue(req)
+        quote = refund_service.quote_item(req.order_item)
+        amount = refund_service.money(quote["paid_amount"])
+        deduction = min(req.deduction_applied, amount)
+        if request.method == "GET":
+            return jsonify(quote=quote, deduction=str(deduction), net_refund_amount=str(amount - deduction))
+        data = request.get_json(silent=True) or {}
+        if refund_service.money(data.get("expected_amount")) != amount - deduction:
+            return jsonify(error="The refund amount changed. Review the latest amount again."), 409
+        refund_service.apply_quote(req, quote)
+        record_admin_action("refund_amount_reviewed", number)
+        db.session.commit()
+        return jsonify(_row(req, "return"))
+    except ValueError as exc:
+        db.session.rollback()
+        return jsonify(error=str(exc)), 409
+
+
 @admin_bp.post("/requests/exchange/<number>/mark-delivered")
 @admin_required
 def mark_delivered(number):
@@ -356,6 +398,11 @@ def mark_delivered(number):
         return jsonify({"error": "Only an approved exchange can be marked delivered"}), 400
     if req.delivered_at:
         return jsonify(_row(req, "exchange"))
+    if (req.outbound_status or "").lower() in ("returned", "cancelled", "canceled"):
+        return jsonify(error="A cancelled shipment cannot be marked delivered. Review it in Delhivery One."), 409
+    booking = shipping_service.booking_details(number).get("replacement", {})
+    if booking.get("action_state") in ("pending", "submitted", "uncertain"):
+        return jsonify(error="Confirm the pending carrier action through tracking before marking delivery."), 409
     # A manual shipment can be confirmed delivered even without an API waybill.
     req.delivered_at = datetime.utcnow()
     req.delivered_by = g.admin_email
@@ -489,9 +536,46 @@ def refresh_tracking(kind, number):
         shipping_service.refresh_tracking(req, kind)
     except Exception:
         db.session.rollback()
+        from app.models import ShippingBooking
+        ShippingBooking.query.filter_by(request_number=number).update({"tracking_error": "Could not refresh Delhivery tracking. Please try again."})
+        db.session.commit()
         return jsonify({"error": "Delhivery tracking is unavailable. Existing shipment details have been kept."}), 503
     db.session.commit()
     deliver_pending(limit=1)
+    return jsonify(_row(req, kind))
+
+
+@admin_bp.post("/requests/<kind>/<number>/cancel-shipment")
+@admin_required
+def cancel_shipment(kind, number):
+    req = _find_request(kind, number)
+    if not req:
+        return jsonify(error="Request not found"), 404
+    try:
+        shipping_service.cancel_shipment(req, kind, (request.get_json(silent=True) or {}).get("leg"))
+        return jsonify(_row(req, kind))
+    except ValueError as exc:
+        db.session.rollback()
+        return jsonify(error=str(exc)), 409
+    except Exception:
+        db.session.rollback()
+        return jsonify(error="Could not verify Delhivery status. No new cancellation was submitted."), 503
+
+
+@admin_bp.post("/requests/<kind>/<number>/retry-emails")
+@admin_required
+def retry_request_emails(kind, number):
+    from app.utils.audit import record_admin_action
+    from app.security import limited
+    blocked = limited("retry-case-emails", number, 3, 300)
+    if blocked is not None:
+        return blocked
+    req = _find_request(kind, number)
+    if not req:
+        return jsonify(error="Request not found"), 404
+    record_admin_action("emails_retry_requested", number)
+    db.session.commit()
+    deliver_pending(request_number=number)
     return jsonify(_row(req, kind))
 
 

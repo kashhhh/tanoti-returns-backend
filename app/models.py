@@ -170,7 +170,7 @@ class OrderItem(db.Model):
         eligible / clickable, or as 'pending'."""
         NON_TERMINAL = (RequestStatus.PENDING, RequestStatus.PICKUP_SCHEDULED, RequestStatus.PARCEL_RECEIVED)
         for r in self.return_requests:
-            if r.status in NON_TERMINAL or (r.status == RequestStatus.COMPLETED and not r.gift_card_code and not r.refund_paid_at):
+            if r.status in NON_TERMINAL or (r.status == RequestStatus.COMPLETED and r.net_refund_amount > 0 and not r.gift_card_code and not r.refund_paid_at):
                 return r
         for e in self.exchange_requests:
             if e.status in NON_TERMINAL or (e.status == RequestStatus.COMPLETED and not e.delivered_at):
@@ -208,6 +208,8 @@ class ReturnRequest(db.Model):
     refund_amount = db.Column(db.Numeric(10, 2), nullable=False)       # item price
     deduction_applied = db.Column(db.Numeric(10, 2), default=0)        # from global toggle, snapshotted at submit time
     net_refund_amount = db.Column(db.Numeric(10, 2), nullable=False)   # refund_amount - deduction_applied
+    refund_breakdown = db.Column(db.JSON, nullable=True)
+    refund_review_error = db.Column(db.String(500), nullable=True)
 
     refund_paid_at = db.Column(db.DateTime, nullable=True)
     refund_paid_by = db.Column(db.String(255), nullable=True)
@@ -301,6 +303,15 @@ class ShippingBooking(db.Model):
     state = db.Column(db.String(16), nullable=False)
     waybill = db.Column(db.String(64), unique=True)
     error = db.Column(db.String(500))
+    carrier_status = db.Column(db.String(64))
+    carrier_status_code = db.Column(db.String(32))
+    tracking_checked_at = db.Column(db.DateTime)
+    tracking_error = db.Column(db.String(500))
+    action = db.Column(db.String(24))
+    action_state = db.Column(db.String(24))
+    action_requested_at = db.Column(db.DateTime)
+    action_error = db.Column(db.String(500))
+    action_history = db.Column(db.JSON, nullable=True)
     created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
     __table_args__ = (db.UniqueConstraint("request_number", "leg", name="uq_shipping_request_leg"),)

@@ -5,7 +5,7 @@ from app.extensions import db
 from app.models import ReturnRequest, ExchangeRequest, OrderItem
 from app.services.request_listing import branch, STAGES
 
-FINAL = ("refund_paid", "gift_card_issued", "delivered", "rejected")
+FINAL = ("refund_paid", "gift_card_issued", "delivered", "rejected", "no_refund_due")
 
 
 def overview(args):
@@ -65,7 +65,7 @@ def overview(args):
         "previous_from": str((start-timedelta(days=days)).date()), "previous_to": str((start-timedelta(days=1)).date()),
         "total": total, "previous_total": previous,
         "active": sum(value for stage, value in counts.items() if stage not in FINAL),
-        "successful": sum(counts[s] for s in ("refund_paid", "gift_card_issued", "delivered")),
+        "successful": sum(counts[s] for s in ("refund_paid", "gift_card_issued", "delivered", "no_refund_due")),
         "rejected": counts["rejected"], "stages": counts,
         "finance": {"approved_unpaid": amount(("refund_approved",)), "paid": amount(("refund_paid",)), "gift_cards": amount(("gift_card_issued",))},
         "products": products, "reasons": reasons, "sizing": sizing, "trend": trend, "oldest": waits,

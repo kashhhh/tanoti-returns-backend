@@ -108,17 +108,22 @@ def required_photos(files):
         photo.stream.seek(0)
         if size > 10 * 1024 * 1024:
             raise ValueError("Each photo must be 10 MB or smaller")
+        oversized = False
         try:
             with Image.open(photo.stream) as img:
                 if img.format not in {"JPEG", "PNG", "WEBP"}:
                     raise ValueError("Unsupported image format")
-                if img.width * img.height > 25_000_000:
-                    raise ValueError("Photo resolution is too large; maximum 25 megapixels")
-                img.verify()
+                oversized = img.width * img.height > 25_000_000
+                if not oversized:
+                    img.verify()
+        except Image.DecompressionBombError as exc:
+            raise ValueError("Photo resolution is too large. Choose a photo of 25 megapixels or less.") from exc
         except Exception as exc:
             raise ValueError("Please upload a valid JPG, PNG or WebP photo (maximum 25 megapixels)") from exc
         finally:
             photo.stream.seek(0)
+        if oversized:
+            raise ValueError("Photo resolution is too large. Choose a photo of 25 megapixels or less.")
         photos.append(photo)
     return photos
 

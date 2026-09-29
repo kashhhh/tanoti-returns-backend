@@ -5,25 +5,31 @@ from sqlalchemy import select, literal, case, union_all, func, or_, cast, String
 from sqlalchemy.orm import joinedload
 from app.extensions import db
 from app.models import ReturnRequest, ExchangeRequest, Customer, OrderItem, Order, RequestStatus
+from app.services.attention_service import predicate
 
 STAGES = ("pending", "pickup_pending", "awaiting_parcel", "parcel_received", "refund_approved",
-          "gift_card_issued", "refund_paid", "replacement_pending", "shipment_booked", "delivered", "rejected")
+          "gift_card_issued", "refund_paid", "replacement_pending", "shipment_booked", "delivered", "rejected",
+          "pickup_cancelled", "replacement_cancelled", "no_refund_due")
 
 
 def branch(model, kind):
-    completed = (case((model.refund_paid_at.isnot(None), "refund_paid"), (func.coalesce(model.gift_card_code, "") != "", "gift_card_issued"), else_="refund_approved")
+    completed = (case((model.net_refund_amount == 0, "no_refund_due"), (model.refund_paid_at.isnot(None), "refund_paid"), (func.coalesce(model.gift_card_code, "") != "", "gift_card_issued"), else_="refund_approved")
                  if kind == "return" else
-                 case((model.delivered_at.isnot(None), "delivered"), (func.coalesce(model.outbound_tracking_id, "") != "", "shipment_booked"), else_="replacement_pending"))
+                 case((model.delivered_at.isnot(None), "delivered"),
+                      (func.lower(model.outbound_status).in_(["returned", "cancelled", "canceled"]), "replacement_cancelled"),
+                      (func.coalesce(model.outbound_tracking_id, "") != "", "shipment_booked"), else_="replacement_pending"))
     stage = case(
         (model.status == RequestStatus.PENDING, "pending"),
         (model.status == RequestStatus.PICKUP_SCHEDULED,
-         case((func.coalesce(model.pickup_tracking_id, "") != "", "awaiting_parcel"), else_="pickup_pending")),
+         case((func.lower(model.pickup_status).in_(["cancelled", "canceled"]), "pickup_cancelled"),
+              (func.coalesce(model.pickup_tracking_id, "") != "", "awaiting_parcel"), else_="pickup_pending")),
         (model.status == RequestStatus.PARCEL_RECEIVED, "parcel_received"),
         (model.status == RequestStatus.REJECTED, "rejected"),
         else_=completed)
     number = model.return_number if kind == "return" else model.exchange_number
     return select(model.id.label("id"), literal(kind).label("kind"), model.created_at.label("created_at"),
                   model.customer_id.label("customer_id"), number.label("number"), stage.label("stage"),
+                  predicate(model, kind).label("attention"),
                   Customer.email.label("email"), Order.order_number.label("order_number"),
                   func.coalesce(func.nullif(OrderItem.shopify_product_id, ""), OrderItem.product_title).label("product_key"),
                   OrderItem.size.label("size"), cast(model.reason, String).label("reason")).select_from(model).join(
@@ -42,7 +48,7 @@ def list_page(args):
     stage = args.get("stage", "all")
     kind = args.get("type", "all")
     sort = args.get("sort", "oldest")
-    if stage not in (*STAGES, "all") or kind not in ("return", "exchange", "all") or sort not in ("oldest", "newest"):
+    if stage not in (*STAGES, "all", "attention") or kind not in ("return", "exchange", "all") or sort not in ("oldest", "newest"):
         raise ValueError("Invalid request filter")
     records = union_all(branch(ReturnRequest, "return"), branch(ExchangeRequest, "exchange")).subquery()
     filters = []
@@ -71,10 +77,13 @@ def list_page(args):
     counts = dict.fromkeys(STAGES, 0)
     counts.update(dict(db.session.execute(select(records.c.stage, func.count()).where(*filters).group_by(records.c.stage)).all()))
     counts["all"] = sum(counts.values())
+    counts["attention"] = db.session.execute(select(func.count()).select_from(records).where(*filters, records.c.attention)).scalar_one()
     total = counts[stage]
     pages = max(1, ceil(total / per_page))
     page = min(page, pages)
-    if stage != "all":
+    if stage == "attention":
+        filters.append(records.c.attention)
+    elif stage != "all":
         filters.append(records.c.stage == stage)
     order = records.c.created_at.asc() if sort == "oldest" else records.c.created_at.desc()
     keys = db.session.execute(select(records.c.id, records.c.kind).where(*filters).order_by(

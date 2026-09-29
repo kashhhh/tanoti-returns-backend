@@ -94,6 +94,8 @@ def _manifest(payload, number, leg):
         if booking.environment != current_app.config["DELHIVERY_ENVIRONMENT"] or booking.warehouse != current_app.config["DELHIVERY_PICKUP_LOCATION"]:
             raise BookingUncertain("An earlier booking belongs to another Delhivery environment or warehouse. Review it before proceeding.")
         if booking.state == "confirmed":
+            if booking.action_state in ("pending", "submitted", "uncertain") or (booking.carrier_status or "").lower() in ("cancelled", "canceled", "returned"):
+                raise BookingUncertain("This shipment has a cancellation or pending action. Review it in Delhivery One.")
             return booking.waybill
         raise BookingUncertain("Delhivery may already have created this shipment. Verify its existing waybill; do not book another.")
     booking = booking or ShippingBooking(reference=reference, request_number=number, leg=leg)
@@ -186,7 +188,7 @@ def reconcile(number, leg, waybill):
     shipment = fetch_tracking(waybill)
     if str(shipment.get("ReferenceNo")) != reference:
         raise ValueError("This waybill belongs to a different request or shipment leg")
-    if (shipment.get("Status") or {}).get("Status", "").lower() in ("cancelled", "canceled"):
+    if (shipment.get("Status") or {}).get("Status", "").lower() in ("cancelled", "canceled", "returned"):
         raise ValueError("This shipment has been cancelled")
     if booking.waybill and booking.waybill != str(waybill):
         raise ValueError("A different waybill is already confirmed")
@@ -196,9 +198,116 @@ def reconcile(number, leg, waybill):
     return "delhivery", str(waybill), "scheduled"
 
 
+def _carrier_date(value):
+    from datetime import timedelta, timezone
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        parsed = parsed.replace(tzinfo=timezone(timedelta(hours=5, minutes=30))) if not parsed.tzinfo else parsed
+        return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    except (TypeError, ValueError):
+        return None
+
+
+def record_tracking(booking, shipment):
+    status = shipment.get("Status") or {}
+    label = str(status.get("Status") or "")
+    booking.carrier_status = label[:64]
+    booking.carrier_status_code = str(shipment.get("NSLCode") or "")[:32]
+    booking.tracking_checked_at = datetime.utcnow()
+    booking.tracking_error = None
+    if booking.action_state not in ("pending", "submitted", "uncertain"):
+        return
+    scan_date = _carrier_date(status.get("StatusDateTime"))
+    # An old carrier scan must not confirm a new action.
+    if not scan_date or not booking.action_requested_at or scan_date < booking.action_requested_at.replace(microsecond=0):
+        return
+    confirmed = booking.action == "cancel" and label.lower() in (
+        ("cancelled", "canceled") if booking.leg == "pickup" else ("returned",))
+    if confirmed:
+        booking.action_state, booking.action_error = "confirmed", None
+        booking.action_history = (booking.action_history or []) + [{
+            "action": booking.action, "state": "confirmed", "at": datetime.utcnow().isoformat() + "Z"}]
+
+
+def _verified_shipment(req, kind, leg):
+    from app.models import RequestStatus
+    number = req.return_number if kind == "return" else req.exchange_number
+    if leg not in ("pickup", "replacement") or (leg == "replacement" and kind != "exchange"):
+        raise ValueError("Choose a pickup or replacement shipment")
+    if ((leg == "pickup" and req.status != RequestStatus.PICKUP_SCHEDULED)
+            or (leg == "replacement" and (req.status != RequestStatus.COMPLETED or req.delivered_at))):
+        raise ValueError("This shipment can no longer be changed from this request")
+    booking = db.session.execute(db.select(ShippingBooking).filter_by(reference=reference_for(number, leg)).with_for_update()).scalar_one_or_none()
+    if not booking or booking.state != "confirmed" or not booking.waybill:
+        raise ValueError("Verify the existing Delhivery booking before changing it")
+    if booking.environment != current_app.config["DELHIVERY_ENVIRONMENT"]:
+        raise ValueError("Use the original booking's Delhivery environment")
+    shipment = fetch_tracking(booking.waybill)
+    if str(shipment.get("ReferenceNo")) != booking.reference:
+        raise ValueError("Tracking reference does not match this request")
+    record_tracking(booking, shipment)
+    prefix = "pickup" if leg == "pickup" else "outbound"
+    setattr(req, prefix + "_status", booking.carrier_status[:32])
+    return booking, shipment
+
+
+def cancel_shipment(req, kind, leg):
+    from flask import g
+    from app.utils.audit import record_admin_action
+    booking, shipment = _verified_shipment(req, kind, leg)
+    label = (booking.carrier_status or "").lower()
+    terminal = ("cancelled", "canceled") if leg == "pickup" else ("returned",)
+    if label in terminal:
+        db.session.commit()
+        return
+    if booking.action_state in ("pending", "submitted", "uncertain"):
+        db.session.commit()
+        raise BookingUncertain("A carrier action is already awaiting confirmation. Refresh tracking; do not submit it again.")
+    movement = {"picked up", "collected", "in transit", "dispatched", "delivered", "out for delivery"}
+    scans = [entry.get("ScanDetail", {}).get("Scan", "").lower() for entry in shipment.get("Scans", [])]
+    if label not in ("manifested", "scheduled", "open", "pending") or any(scan in movement for scan in scans):
+        raise ValueError("The parcel may already be moving. Arrange cancellation with Delhivery One or your account contact.")
+    booking.action, booking.action_state = "cancel", "pending"
+    booking.action_requested_at, booking.action_error = datetime.utcnow(), None
+    booking.action_history = (booking.action_history or []) + [{"action": "cancel", "state": "requested",
+        "by": g.admin_email, "at": booking.action_requested_at.isoformat() + "Z"}]
+    record_admin_action("shipment_cancel_requested", booking.reference)
+    db.session.commit()  # Durable action fence before contacting the carrier.
+    try:
+        response = requests.post(_base_url() + "/api/p/edit", headers=_headers(),
+            json={"waybill": booking.waybill, "cancellation": "true"}, timeout=20)
+        if response.status_code in (401, 403):
+            raise BookingRejected("Delhivery rejected the credentials. Correct them before retrying.")
+        response.raise_for_status()
+        # HTTP acceptance is not cancellation. Only authenticated tracking
+        # confirming the target status can complete the action.
+        booking = db.session.execute(db.select(ShippingBooking).filter_by(reference=booking.reference).with_for_update()).scalar_one()
+        if booking.action_state == "pending":
+            booking.action_state = "submitted"
+        db.session.commit()
+        fresh = fetch_tracking(booking.waybill)
+        if str(fresh.get("ReferenceNo")) != booking.reference:
+            raise ValueError("Tracking mismatch")
+        record_tracking(booking, fresh)
+        setattr(req, ("pickup" if leg == "pickup" else "outbound") + "_status", booking.carrier_status[:32])
+        db.session.commit()
+    except Exception as exc:
+        db.session.rollback()
+        message = str(exc) if isinstance(exc, BookingRejected) else "Cancellation is not confirmed. Refresh tracking or check Delhivery One before taking another action."
+        ShippingBooking.query.filter_by(reference=booking.reference).filter(
+            ShippingBooking.action_state.in_(["pending", "submitted"])).update({
+                "action_state": "rejected" if isinstance(exc, BookingRejected) else "uncertain", "action_error": message})
+        db.session.commit()
+        raise BookingUncertain(message) from exc
+
+
 def booking_details(number):
     return {b.leg: {"reference": b.reference, "state": b.state, "error": b.error,
-                    "environment": b.environment, "waybill": b.waybill}
+                    "environment": b.environment, "waybill": b.waybill,
+                    "carrier_status": b.carrier_status, "tracking_error": b.tracking_error,
+                    "tracking_checked_at": b.tracking_checked_at.isoformat() + "Z" if b.tracking_checked_at else None,
+                    "action": b.action, "action_state": b.action_state, "action_error": b.action_error,
+                    "action_history": b.action_history or []}
             for b in ShippingBooking.query.filter_by(request_number=number)}
 
 
@@ -224,6 +333,7 @@ def refresh_tracking(req, kind):
         label = str(status.get("Status") or "")
         if label:
             setattr(req, prefix + "_status", label[:32])
+        record_tracking(booking, shipment)
         if (leg == "replacement" and label.lower() == "delivered" and status.get("StatusType") == "DL"
                 and req.status == RequestStatus.COMPLETED and not req.delivered_at):
             # Carrier timestamps without an offset are India local time.
@@ -263,7 +373,8 @@ def sync_tracking(limit=100):
                 db.session.commit()
             except Exception:
                 db.session.rollback()
-                ShippingBooking.query.filter_by(request_number=number).update({"updated_at": datetime.utcnow()})
+                ShippingBooking.query.filter_by(request_number=number).update({"updated_at": datetime.utcnow(),
+                    "tracking_error": "Could not refresh Delhivery tracking. Please try again."})
                 db.session.commit()
                 current_app.logger.warning("Delhivery tracking refresh failed for %s request %s", kind, ident)
     deliver_pending()

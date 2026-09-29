@@ -23,6 +23,18 @@ if __name__ == "__main__":
             patch("app.auth.routes._generate_otp", return_value="123456"), \
             patch("app.auth.admin_routes.secrets.choice", return_value="1"):
         assert fixture.submit().status_code == 201
+        if "--operations" in sys.argv:
+            from datetime import datetime, timedelta
+            from app.extensions import db
+            from app.models import ReturnRequest, RequestStatus, ShippingBooking
+            req = ReturnRequest.query.one()
+            req.status = RequestStatus.PICKUP_SCHEDULED
+            req.photo_decision_at = datetime.utcnow() - timedelta(days=4)
+            req.pickup_carrier, req.pickup_tracking_id, req.pickup_status = "delhivery", "1234567890123", "Scheduled"
+            db.session.add(ShippingBooking(reference=req.return_number + "-R", request_number=req.return_number,
+                leg="pickup", environment="staging", warehouse="Test warehouse", state="confirmed",
+                waybill=req.pickup_tracking_id, carrier_status="Scheduled"))
+            db.session.commit()
         fixture.ctx.pop()
         try:
             fixture.app.run(host="127.0.0.1", port=5009, debug=False, use_reloader=False, threaded=False)

@@ -63,8 +63,20 @@ class WorkflowTests(unittest.TestCase):
         self.network.start()
         self.stock = patch("app.services.shopify_client.select_exchange_variant", return_value={"id":"200", "size":"M"})
         self.stock.start()
+        def paid_order(order_id):
+            source = Order.query.filter_by(shopify_order_id=str(order_id)).one()
+            lines = {}
+            for unit in source.items:
+                if not unit.replacement_for:
+                    lines[unit.shopify_line_item_id] = {"id": unit.shopify_line_item_id, "price": str(unit.price),
+                        "quantity": unit.line_quantity, "discount_allocations": [], "tax_lines": []}
+            return {"id": order_id, "currency": "INR", "financial_status": "paid", "taxes_included": True,
+                    "line_items": list(lines.values()), "refunds": []}
+        self.paid_order = patch("app.services.shopify_client.fetch_order", side_effect=paid_order)
+        self.paid_order.start()
 
     def tearDown(self):
+        self.paid_order.stop()
         self.stock.stop()
         self.network.stop()
         db.session.remove(); db.drop_all(); self.ctx.pop(); self.directory.cleanup()
@@ -83,6 +95,32 @@ class WorkflowTests(unittest.TestCase):
             data.setdefault("restock", False)
         return self.client.post(f"/api/admin/requests/{kind}/{number}/{action}",
                                 json=data, headers=self.admin_headers)
+
+    def test_oversized_photos_show_actionable_errors_without_creating_requests(self):
+        for kind in ("return", "exchange"):
+            response = self.submit(kind, photo_front=(io.BytesIO(b"x" * (10 * 1024 * 1024 + 1)), "large.jpg"))
+            self.assertEqual(response.status_code, 400)
+            self.assertIn("10 MB", response.json["error"])
+        self.assertEqual(ReturnRequest.query.count(), 0)
+        self.assertEqual(ExchangeRequest.query.count(), 0)
+
+    def test_upload_body_limit_returns_readable_json(self):
+        self.app.config["MAX_CONTENT_LENGTH"] = 1024
+        for kind in ("return", "exchange"):
+            response = self.submit(kind)
+            self.assertEqual(response.status_code, 413)
+            self.assertIn("Choose smaller photos", response.json["error"])
+        self.assertEqual(ReturnRequest.query.count(), 0)
+        self.assertEqual(ExchangeRequest.query.count(), 0)
+
+    def test_high_resolution_photo_has_specific_error(self):
+        stream = io.BytesIO()
+        Image.new("RGB", (5001, 5000)).save(stream, "PNG")
+        stream.seek(0)
+        response = self.submit(photo_front=(stream, "large.png"))
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("resolution is too large", response.json["error"])
+        self.assertEqual(ReturnRequest.query.count(), 0)
 
     def test_admin_requires_secret_and_allowlist(self):
         with patch("app.auth.admin_routes.send_admin_otp_email") as send:

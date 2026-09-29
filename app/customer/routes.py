@@ -13,6 +13,7 @@ from app.utils.numbering import next_return_number, next_exchange_number
 from app.utils.tracking import build_timeline
 from app.utils.request_status import summary_for
 from app.services.shopify_returns import sync_one
+from app.services import refund_service
 
 customer_bp = Blueprint("customer", __name__)
 
@@ -158,6 +159,13 @@ def get_order_item(item_id):
     # from the exchange dropdown per the earlier decision.
     available_sizes = sorted({v["size"] for v in variants if v["in_stock"] and v.get("size")})
 
+    refund_quote, refund_error = None, None
+    if item.request_block_reason(settings.return_window_days) is None:
+        try:
+            refund_quote = refund_service.quote_item(item)
+        except ValueError as exc:
+            refund_error = str(exc)
+
     return jsonify({
         **_item_payload(item, settings.return_window_days, True),
         "id": item.id,
@@ -171,6 +179,8 @@ def get_order_item(item_id):
         "deduction_enabled": settings.deduction_enabled,
         "deduction_amount": str(settings.deduction_amount) if settings.deduction_enabled else "0",
         "available_sizes": available_sizes,
+        "refund_quote": refund_quote,
+        "refund_error": refund_error,
     })
 
 
@@ -289,6 +299,17 @@ def submit_return(item_id):
     if len(photos) < 2:
         return jsonify({"error": "At least 2 photos (front and back) are required"}), 400
 
+    try:
+        refund_quote = refund_service.quote_item(item)
+        settings = AdminSettings.get()
+        paid_amount = refund_service.money(refund_quote["paid_amount"])
+        deduction = min(settings.deduction_amount if settings.deduction_enabled else 0, paid_amount)
+        net_amount = paid_amount - deduction
+        if request.form.get("expected_refund_amount") is not None and refund_service.money(request.form["expected_refund_amount"]) != net_amount:
+            return jsonify(error="The refund amount changed. Reload this item to review the latest amount before submitting."), 409
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 409
+
     if not _claim_unit(item):
         db.session.rollback()
         return jsonify({"error": "A request has already been submitted for this unit"}), 409
@@ -299,11 +320,6 @@ def submit_return(item_id):
     except ValueError as exc:
         db.session.rollback()
         return jsonify({"error": str(exc)}), 400
-
-    settings = AdminSettings.get()
-    deduction = settings.deduction_amount if settings.deduction_enabled else 0
-    deduction = min(deduction, item.price)
-    net_amount = item.price - deduction
 
     r = ReturnRequest(
         order_item=item,
@@ -317,7 +333,8 @@ def submit_return(item_id):
         customer_note=customer_note,
         photo_urls=photo_urls,
         refund_mode=RefundMode(refund_mode),
-        refund_amount=item.price,
+        refund_amount=paid_amount,
+        refund_breakdown=refund_quote,
         deduction_applied=deduction,
         net_refund_amount=net_amount,
     )

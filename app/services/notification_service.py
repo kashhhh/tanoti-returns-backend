@@ -48,14 +48,17 @@ def queue_update(obj, kind, event):
                                 subject=f"{subject} · {number}", html=layout(subject, html)))
 
 
-def deliver_pending(limit=50):
+def deliver_pending(limit=50, request_number=None):
     # Each row is locked until its attempt is recorded; concurrent workers skip it.
     # Retire unsent legacy status emails so a deployment cannot send old chatter.
     for note in Notification.query.filter_by(sent_at=None).all():
         if note.event_key.rsplit(":", 1)[-1] not in EMAIL_EVENTS:
             db.session.delete(note)
     db.session.commit()
-    ids = [row.id for row in Notification.query.filter_by(sent_at=None).order_by(Notification.id).limit(limit).all()]
+    pending = Notification.query.filter_by(sent_at=None)
+    if request_number:
+        pending = pending.filter(Notification.event_key.like(request_number + ":%"))
+    ids = [row.id for row in pending.order_by(Notification.id).limit(limit).all()]
     for ident in ids:
         note = db.session.execute(db.select(Notification).filter_by(id=ident, sent_at=None)
                                   .with_for_update(skip_locked=True)).scalar_one_or_none()
