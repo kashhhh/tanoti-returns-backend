@@ -1,5 +1,10 @@
 # Security round 2 — 24 September 2026
 
+Current VPS rollout: [VPS_SECURITY_CHECKLIST.md](VPS_SECURITY_CHECKLIST.md).
+The refund and shipping gaps listed below describe this earlier review; subsequent
+work added refund validation and durable shipping controls. Live verification is
+still required.
+
 Implemented locally in backend and frontend. No VPS, cloud, live customer data or provider configuration was changed. Infrastructure work remains deferred to the manual [VPS guide](SECURITY.md).
 
 ## Changes implemented

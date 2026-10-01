@@ -22,7 +22,9 @@ class Config:
     ADMIN_SESSION_HOURS = 8
     TESTING_MODE = os.environ.get("TESTING_MODE", "false").lower() == "true"
     MAX_CONTENT_LENGTH = 22 * 1024 * 1024
-    MAX_FORM_MEMORY_SIZE = 64 * 1024
+    # Multipart decoding buffers a 64 KiB chunk plus boundary bytes. Setting
+    # this to exactly 64 KiB rejects normal file uploads before photo validation.
+    MAX_FORM_MEMORY_SIZE = 512 * 1024
     MAX_FORM_PARTS = 20
     CORS_ORIGINS = os.environ.get("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173")
     SQLALCHEMY_DATABASE_URI = os.environ.get(

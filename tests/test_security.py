@@ -17,7 +17,7 @@ class SecurityTests(unittest.TestCase):
     tearDown = fixtures.WorkflowTests.tearDown
 
     def send_code(self):
-        with patch("app.auth.routes.shopify_client.find_customer_by_email", return_value={"id": "100"}), \
+        with patch("app.auth.routes.shopify_client.find_customer_by_email", return_value={"id": "100", "email": "customer@example.com"}), \
                 patch("app.auth.routes.email_service.send_otp_email") as send:
             result = self.client.post("/api/auth/request-otp", json={"email": "customer@example.com"})
         self.assertEqual(result.status_code, 200)
@@ -60,7 +60,7 @@ class SecurityTests(unittest.TestCase):
     def test_unknown_email_has_same_send_response(self):
         with patch("app.auth.routes.shopify_client.find_customer_by_email", return_value=None):
             missing = self.client.post("/api/auth/request-otp", json={"email": "missing@example.com"})
-        with patch("app.auth.routes.shopify_client.find_customer_by_email", return_value={"id": "100"}), \
+        with patch("app.auth.routes.shopify_client.find_customer_by_email", return_value={"id": "100", "email": "customer@example.com"}), \
                 patch("app.auth.routes.email_service.send_otp_email"):
             existing = self.client.post("/api/auth/request-otp", json={"email": "customer@example.com"})
         missing_data, existing_data = missing.json, existing.json

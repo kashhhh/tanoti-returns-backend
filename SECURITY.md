@@ -1,5 +1,9 @@
 # Security review and manual rollout — 24 September 2026
 
+For the consolidated current VPS checklist, including the actual live paths, port,
+service name and production migration branches, use [VPS_SECURITY_CHECKLIST.md](VPS_SECURITY_CHECKLIST.md).
+The deployment examples below are historical templates and require adaptation.
+
 This review covers the local Flask/React source and dependency manifests. The DigitalOcean VPS was not accessed or changed. The app is not serving customers yet. The templates assume Ubuntu/Debian, systemd, nginx, and PostgreSQL; adapt them to the installed OS and existing paths before applying.
 
 Round 2 implementation, verification and outstanding launch risks: **[SECURITY_ROUND_2.md](SECURITY_ROUND_2.md)**. VPS work below is still deferred.

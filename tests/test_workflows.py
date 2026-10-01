@@ -104,6 +104,24 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(ReturnRequest.query.count(), 0)
         self.assertEqual(ExchangeRequest.query.count(), 0)
 
+    def test_valid_500kb_and_2mb_photos_are_accepted(self):
+        def sized_photo(size):
+            stream, name = photo()
+            content = stream.getvalue()
+            # JPEG allows trailing bytes. CR bytes exercise multipart decoder
+            # carry-over between 64 KiB reads, which triggered the false 413.
+            return io.BytesIO(content + b"\r" * (size - len(content))), name
+
+        for kind in ("return", "exchange"):
+            with self.subTest(kind=kind):
+                response = self.submit(kind, photo_front=sized_photo(500 * 1024),
+                                       photo_back=sized_photo(2 * 1024 * 1024))
+                self.assertEqual(response.status_code, 201, response.json)
+                db.session.query(ReturnRequest).delete()
+                db.session.query(ExchangeRequest).delete()
+                db.session.get(OrderItem, self.item_id).request_claimed = False
+                db.session.commit()
+
     def test_upload_body_limit_returns_readable_json(self):
         self.app.config["MAX_CONTENT_LENGTH"] = 1024
         for kind in ("return", "exchange"):
@@ -288,7 +306,7 @@ class WorkflowTests(unittest.TestCase):
     def test_shared_testing_flag_customer_console_and_verification(self):
         self.app.config.update(TESTING_MODE=True, DEBUG=False, RESEND_API_KEY="fake")
         payload = dict(email="customer@example.com")
-        with patch("resend.Emails.send") as send, patch("builtins.print") as output, patch("app.services.shopify_client.find_customer_by_email", return_value={"id": "100"}):
+        with patch("resend.Emails.send") as send, patch("builtins.print") as output, patch("app.services.shopify_client.find_customer_by_email", return_value={"id": "100", "email": "customer@example.com"}):
             result = self.client.post("/api/auth/request-otp", json=payload)
         send.assert_not_called()
         self.assertEqual(result.status_code, 200)
@@ -299,7 +317,7 @@ class WorkflowTests(unittest.TestCase):
 
     def test_production_email_failures_do_not_log_codes_even_in_debug(self):
         self.app.config.update(TESTING_MODE=False, DEBUG=True, RESEND_API_KEY="fake")
-        with patch("resend.Emails.send", side_effect=RuntimeError("unverified domain")), patch("builtins.print") as output, patch("app.services.shopify_client.find_customer_by_email", return_value={"id": "100"}):
+        with patch("resend.Emails.send", side_effect=RuntimeError("unverified domain")), patch("builtins.print") as output, patch("app.services.shopify_client.find_customer_by_email", return_value={"id": "100", "email": "customer@example.com"}):
             admin = self.client.post("/api/admin/auth/request-otp", json=dict(email="staff@example.com", secret="test-admin-secret"))
             customer = self.client.post("/api/auth/request-otp", json=dict(email="customer@example.com"))
         self.assertEqual(admin.status_code, 503)

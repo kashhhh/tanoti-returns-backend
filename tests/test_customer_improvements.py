@@ -1,6 +1,6 @@
 import unittest
 from unittest.mock import patch, Mock
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import test_workflows as fixtures
 from app.extensions import db
@@ -14,14 +14,62 @@ class CustomerImprovementsTests(unittest.TestCase):
     submit = fixtures.WorkflowTests.submit
     action = fixtures.WorkflowTests.action
 
+    def login_order_payload(self):
+        return {"id": "100", "order_number": "100", "email": "customer@example.com",
+                "customer": {"id": "10", "email": "customer@example.com"},
+                "line_items": [{"id": "1", "title": "Shirt", "quantity": 1, "price": "999"}],
+                "fulfillments": [{"created_at": datetime.utcnow().isoformat(), "status": "success",
+                                  "line_items": [{"id": "1", "quantity": 1}]}]}
+
     def order_login(self):
-        order = {"email": "customer@example.com", "customer": {"id": "10", "email": "customer@example.com"}}
+        order = self.login_order_payload()
         with patch.object(shopify_client, "find_order_for_login", return_value=order), patch("app.auth.routes.email_service.send_otp_email") as send:
             result = self.client.post("/api/auth/request-otp", json={"order_id": "#100"})
         self.assertEqual(result.status_code, 200)
         self.assertNotIn("customer@example.com", result.get_data(as_text=True))
         self.assertEqual(send.call_args.args[0], "customer@example.com")
         return result.json["challenge"], send.call_args.args[1]
+
+    def test_ineligible_order_never_sends_a_code(self):
+        for state in ("unfulfilled", "expired", "cancelled", "refunded", "claimed"):
+            with self.subTest(state=state):
+                order = self.login_order_payload()
+                item = db.session.get(OrderItem, self.item_id)
+                item.request_claimed = state == "claimed"
+                if state == "unfulfilled":
+                    order["fulfillments"] = []
+                if state == "expired":
+                    order["fulfillments"][0]["created_at"] = (datetime.utcnow() - timedelta(days=365)).isoformat()
+                if state == "cancelled":
+                    order["cancelled_at"] = datetime.utcnow().isoformat()
+                if state == "refunded":
+                    order["refunds"] = [{"refund_line_items": [{"line_item_id": "1", "quantity": 1}]}]
+                db.session.commit()
+                with patch.object(shopify_client, "find_order_for_login", return_value=order), patch("app.auth.routes.email_service.send_otp_email") as send:
+                    result = self.client.post("/api/auth/request-otp", json={"order_id": "100"})
+                self.assertEqual(result.status_code, 200)
+                send.assert_not_called()
+                self.assertEqual(OTPToken.query.count(), 0)
+
+    def test_unknown_or_mismatched_email_never_sends_a_code(self):
+        for customer in (None, {"id": "10", "email": "someoneelse@example.com"}):
+            with patch.object(shopify_client, "find_customer_by_email", return_value=customer), patch("app.auth.routes.email_service.send_otp_email") as send:
+                result = self.client.post("/api/auth/request-otp", json={"email": "customer@example.com"})
+            self.assertEqual(result.status_code, 200)
+            send.assert_not_called()
+            self.assertEqual(OTPToken.query.count(), 0)
+            self.assertEqual(self.client.post("/api/auth/verify-otp", json={"challenge": result.json["challenge"], "otp": "123456"}).status_code, 400)
+
+    def test_real_customer_can_login_by_email_without_eligible_orders(self):
+        db.session.get(OrderItem, self.item_id).order.fulfilled_at = None
+        db.session.commit()
+        customer = {"id": "10", "email": "customer@example.com"}
+        with patch.object(shopify_client, "find_customer_by_email", return_value=customer), patch("app.auth.routes.email_service.send_otp_email") as send:
+            result = self.client.post("/api/auth/request-otp", json={"email": "customer@example.com"})
+        self.assertEqual(result.status_code, 200)
+        send.assert_called_once()
+        response = self.client.post("/api/auth/verify-otp", json={"challenge": result.json["challenge"], "otp": send.call_args.args[1]})
+        self.assertEqual(response.status_code, 200)
 
     def test_order_login_is_private_single_use_and_requires_code(self):
         challenge, code = self.order_login()

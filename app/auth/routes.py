@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from flask import Blueprint, request, jsonify, current_app, g
 
 from app.extensions import db
-from app.models import Customer, OTPToken
+from app.models import Customer, OTPToken, AdminSettings
 from app.services import shopify_client, email_service, sync_service
 from app.utils.decorators import login_required
 from app.utils.sessions import create_session, csrf_token, set_session_cookie, logout_response
@@ -68,6 +68,16 @@ def request_otp():
         # Never grant account-wide access to a different order contact address.
         if not shopify_customer or not email or email != _email(shopify_customer):
             return _sent_response()
+        try:
+            synced_order = sync_service.upsert_order(order)
+            days = AdminSettings.get().return_window_days
+            if not synced_order or not any(item.request_block_reason(days) is None
+                                           for item in synced_order.items):
+                return _sent_response()
+        except Exception:
+            db.session.rollback()
+            current_app.logger.warning("Order eligibility lookup unavailable")
+            return jsonify({"error": "Login is temporarily unavailable. Please try again shortly."}), 503
     if not email:
         return jsonify({"error": "Enter a valid email address"}), 400
     blocked = limited("customer-send", email, 5, 900)
@@ -86,7 +96,7 @@ def request_otp():
     except Exception:
         current_app.logger.warning("Customer lookup unavailable")
         return jsonify({"error": "Login is temporarily unavailable. Please try again shortly."}), 503
-    if not shopify_customer:
+    if not shopify_customer or not shopify_customer.get("id") or _email(shopify_customer) != email:
         return _sent_response()
 
     customer = Customer.query.filter_by(email=email).first()

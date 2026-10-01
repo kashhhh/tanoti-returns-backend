@@ -76,12 +76,13 @@ status-change emails have been added.
 ## Deploy
 
 Back up the database first. Deploy the backend and rebuilt frontend together.
-Run with the same environment used by the live `tanoti` service:
+Run with the same environment and database used by the live `tanoti-returns` service:
 
 ```bash
 cd /var/www/tanoti-returns/backend
-.venv/bin/python -m flask --app run.py db upgrade
-sudo systemctl restart tanoti
+.venv/bin/python -m flask --app run.py db upgrade && \
+.venv/bin/python -m flask --app run.py db current && \
+sudo systemctl restart tanoti-returns
 ```
 
 Migration **a74e13b95c02** adds refund evidence and carrier-action fields. It follows
@@ -89,6 +90,13 @@ f63d029c471a and is required before this backend starts serving requests. No new
 credentials or environment variables are needed. Build the frontend with the
 existing production settings and deploy its `dist` output. Keep the Delhivery
 tracking timer and email retry job enabled.
+
+The current revision after upgrading should be `a74e13b95c02 (head)`. An error
+such as `column shipping_bookings.action_state does not exist` means the database
+used by the app has not received this migration. Ensure the deployed files include
+`migrations/versions/a74e13b95c02_refunds_shipping_controls.py`, then run the
+upgrade against the live service's database. Do not use `db stamp` to bypass the
+upgrade; it would leave the required columns missing.
 
 Automated tests use isolated SQLite and mocked providers, including monetary
 rounding, discounts/tax/deductions, stale quotes, external refunds, zero refunds,
