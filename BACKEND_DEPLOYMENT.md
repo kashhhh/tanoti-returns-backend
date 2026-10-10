@@ -73,6 +73,12 @@ the existing service. `.env`, uploads, `.venv` and VPS-only migrations are retai
 The Git checkout itself is not advanced by this archive deployment; the last
 successful deployed commit is recorded in `.deployed-revision` instead.
 
+Extraction preserves the permissions and ownership of existing directories, so
+deployment access may be granted with ACLs instead of transferring ownership.
+Packaged file contents are updated using the deployment user's write access.
+Permission adjustments apply only to entries owned by that user; files absent
+from the archive (including VPS-only migrations) remain untouched.
+
 The startup check expects an unauthenticated `/api/auth/session` request to return
 401 on port 8010. A separate public check verifies nginx can reach the API. These
 checks do not send OTPs or certify live Shopify/WhatsApp delivery.
