@@ -316,3 +316,7 @@ Returns and exchanges accept an optional `customer_note` field (maximum 2,000 ch
 ### Individual units, replacement returns and Shopify sync
 
 See `SHOPIFY_SYNC_SETUP.md` for the unit-splitting migration, delivered replacement backfill, Shopify scopes, retry command and financial-reconciliation limitations. `.env` was not changed.
+# WhatsApp customer login
+
+Customers can choose email or their registered WhatsApp number for login codes.
+See [WhatsApp login setup](WHATSAPP_LOGIN.md) for backend configuration and deployment.

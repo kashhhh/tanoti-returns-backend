@@ -8,7 +8,7 @@ from flask import Blueprint, request, jsonify, current_app, g
 
 from app.extensions import db
 from app.models import Customer, OTPToken, AdminSettings
-from app.services import shopify_client, email_service, sync_service
+from app.services import shopify_client, email_service, sync_service, whatsapp_service
 from app.utils.decorators import login_required
 from app.utils.sessions import create_session, csrf_token, set_session_cookie, logout_response
 from app.security import limited, lock_login
@@ -32,10 +32,10 @@ def _email(data):
     return email
 
 
-def _sent_response(token=None):
-    delivery = "console" if current_app.config.get("TESTING_MODE") else "email"
+def _sent_response(token=None, channel="email"):
+    delivery = "console" if current_app.config.get("TESTING_MODE") else channel
     challenge = token.challenge if token else secrets.token_urlsafe(32)
-    return jsonify({"message": "If these details match an account, a code has been sent to its email.",
+    return jsonify({"message": "If these details match an eligible account with the selected contact method, a code has been sent.",
                     "challenge": challenge,
                     "delivery": delivery, "expires_in_minutes": current_app.config["OTP_EXPIRY_MINUTES"]})
 
@@ -45,10 +45,24 @@ def _generate_otp() -> str:
     return "".join(secrets.choice("0123456789") for _ in range(length))
 
 
+def _delivery_options(customer=None):
+    channels = ["email"]
+    if customer and whatsapp_service.is_configured() and whatsapp_service.registered_phone(customer):
+        channels.append("whatsapp")
+    return jsonify({"channels": channels})
+
+
 @auth_bp.route("/request-otp", methods=["POST"])
 @auth_bp.route("/resend-otp", methods=["POST"])
+@auth_bp.route("/delivery-options", methods=["POST"])
 def request_otp():
     data = request.get_json(silent=True)
+    options_only = request.path.endswith("/delivery-options")
+    channel = data.get("channel", "email") if isinstance(data, dict) else "email"
+    if channel not in ("email", "whatsapp"):
+        return jsonify({"error": "Choose email or WhatsApp for your code"}), 400
+    if channel == "whatsapp" and not whatsapp_service.is_configured():
+        return jsonify({"error": "WhatsApp login is currently unavailable. Please choose email."}), 503
     email = _email(data)
     shopify_customer = None
     order_id = data.get("order_id") if isinstance(data, dict) else None
@@ -56,7 +70,7 @@ def request_otp():
         if email or not isinstance(order_id, str) or not re.fullmatch(r"#?[A-Za-z0-9][A-Za-z0-9_-]{0,63}", order_id.strip()):
             return jsonify({"error": "Enter a valid order ID or email address"}), 400
         order_id = order_id.strip().lstrip("#")
-        blocked = limited("customer-order-send", order_id.lower(), 5, 900)
+        blocked = limited("customer-order-options" if options_only else "customer-order-send", order_id.lower(), 5, 900)
         if blocked is not None:
             return blocked
         try:
@@ -67,26 +81,26 @@ def request_otp():
         email = _email({"email": (order or {}).get("email")})
         # Never grant account-wide access to a different order contact address.
         if not shopify_customer or not email or email != _email(shopify_customer):
-            return _sent_response()
+            return _delivery_options() if options_only else _sent_response(channel=channel)
         try:
             synced_order = sync_service.upsert_order(order)
             days = AdminSettings.get().return_window_days
             if not synced_order or not any(item.request_block_reason(days) is None
                                            for item in synced_order.items):
-                return _sent_response()
+                return _delivery_options() if options_only else _sent_response(channel=channel)
         except Exception:
             db.session.rollback()
             current_app.logger.warning("Order eligibility lookup unavailable")
             return jsonify({"error": "Login is temporarily unavailable. Please try again shortly."}), 503
     if not email:
         return jsonify({"error": "Enter a valid email address"}), 400
-    blocked = limited("customer-send", email, 5, 900)
+    blocked = limited("customer-options" if options_only else "customer-send", email, 5, 900)
     if blocked is not None:
         return blocked
     lock_login("customer:" + email)
     last_token = OTPToken.query.filter_by(email=email).order_by(OTPToken.id.desc()).first()
     cooldown = current_app.config["OTP_RESEND_COOLDOWN_SECONDS"]
-    if last_token and (datetime.utcnow() - last_token.created_at).total_seconds() < cooldown:
+    if not options_only and last_token and (datetime.utcnow() - last_token.created_at).total_seconds() < cooldown:
         return jsonify({"error": "Please wait before requesting another code"}), 429
 
     # Validate the email actually belongs to a real Tanoti customer before
@@ -97,7 +111,14 @@ def request_otp():
         current_app.logger.warning("Customer lookup unavailable")
         return jsonify({"error": "Login is temporarily unavailable. Please try again shortly."}), 503
     if not shopify_customer or not shopify_customer.get("id") or _email(shopify_customer) != email:
-        return _sent_response()
+        return _delivery_options() if options_only else _sent_response(channel=channel)
+
+    if options_only:
+        return _delivery_options(shopify_customer)
+
+    phone = whatsapp_service.registered_phone(shopify_customer)
+    if channel == "whatsapp" and not phone:
+        return _sent_response(channel=channel)
 
     customer = Customer.query.filter_by(email=email).first()
     if not customer:
@@ -119,13 +140,16 @@ def request_otp():
     db.session.commit()
 
     try:
-        email_service.send_otp_email(email, otp)
+        if channel == "whatsapp":
+            whatsapp_service.send_otp_whatsapp(phone, otp)
+        else:
+            email_service.send_otp_email(email, otp)
     except Exception:
         token.consumed = True
         db.session.commit()
         current_app.logger.warning("Customer OTP delivery failed")
         return jsonify({"error": "Could not send the code. Please try again shortly."}), 503
-    return _sent_response(token)
+    return _sent_response(token, channel)
 
 
 @auth_bp.route("/verify-otp", methods=["POST"])

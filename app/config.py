@@ -46,6 +46,13 @@ class Config:
     RESEND_API_KEY = os.environ.get("RESEND_API_KEY")
     EMAIL_FROM = os.environ.get("EMAIL_FROM", "returns@tanotiofficial.com")
 
+    # Meta WhatsApp Cloud API (same credentials as the WhatsApp Shopify app).
+    WHATSAPP_ACCESS_TOKEN = os.environ.get("WHATSAPP_ACCESS_TOKEN")
+    WHATSAPP_PHONE_NUMBER_ID = os.environ.get("WHATSAPP_PHONE_NUMBER_ID")
+    WHATSAPP_API_VERSION = os.environ.get("WHATSAPP_API_VERSION", "v23.0")
+    WHATSAPP_OTP_TEMPLATE_NAME = os.environ.get("WHATSAPP_OTP_TEMPLATE_NAME")
+    WHATSAPP_OTP_TEMPLATE_LANGUAGE = os.environ.get("WHATSAPP_OTP_TEMPLATE_LANGUAGE", "en_US")
+
     # Local photo storage (on this app's own disk/VPS -- no third-party
     # storage service). Default lands in backend/uploads; override with an
     # absolute path in production if you want it elsewhere.

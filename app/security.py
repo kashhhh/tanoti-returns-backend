@@ -93,7 +93,7 @@ def install_security(app):
                 request.max_content_length = 4096 if request.path.startswith(("/api/auth/", "/api/admin/auth/")) else 64 * 1024
                 if not isinstance(request.get_json(silent=True), dict):
                     return jsonify({"error": "Expected a JSON object"}), 400
-        if request.method == "POST" and request.path.endswith(("/request-otp", "/resend-otp", "/verify-otp")) and request.path.startswith(("/api/auth/", "/api/admin/auth/")):
+        if request.method == "POST" and request.path.endswith(("/request-otp", "/resend-otp", "/verify-otp", "/delivery-options")) and request.path.startswith(("/api/auth/", "/api/admin/auth/")):
             request.max_content_length = 4096
             if request.content_length and request.content_length > 4096:
                 return jsonify({"error": "Login request is too large"}), 413
