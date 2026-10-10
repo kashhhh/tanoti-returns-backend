@@ -1,4 +1,4 @@
-from flask import Blueprint, request, jsonify, g
+from flask import Blueprint, request, jsonify, g, current_app
 
 from app.extensions import db
 from app.models import (
@@ -25,6 +25,18 @@ def _customer_note(form):
     return note or None
 
 
+def _refresh_eligibility(order=None):
+    try:
+        if order:
+            sync_service.refresh_order_if_stale(order)
+        else:
+            sync_service.refresh_customer_orders_if_stale(g.customer)
+    except Exception:
+        db.session.rollback()
+        current_app.logger.warning("Customer delivery refresh unavailable")
+        return jsonify(error="We could not confirm the latest delivery details. Please try again shortly."), 503
+
+
 def _item_payload(item: OrderItem, window_days: int, eligible: bool):
     active = item.active_request()
     deadline = item.request_deadline(window_days)
@@ -42,6 +54,7 @@ def _item_payload(item: OrderItem, window_days: int, eligible: bool):
         "eligible": block is None,
         "fulfilled": bool(item.fulfilled_at if item.fulfillment_known else item.order.fulfilled_at),
         "delivered": item.delivered_at is not None,
+        "delivered_at": item.delivered_at.isoformat() + "Z" if item.delivered_at else None,
         "return_deadline": deadline.isoformat() + "Z" if deadline else None,
         "pending": active is not None,
         "status": active.status.value if active else None,
@@ -54,6 +67,9 @@ def list_orders():
     """Returns two buckets: eligible-for-return items, and expired-window
     items, across all of the logged-in customer's orders. Items (not
     orders) are the clickable unit, per spec."""
+    refresh_error = _refresh_eligibility()
+    if refresh_error:
+        return refresh_error
     settings = AdminSettings.get()
     window_days = settings.return_window_days
 
@@ -81,6 +97,12 @@ def search_order():
 
     order = Order.query.filter_by(customer_id=g.customer.id, order_number=query).first()
     if not order:
+        return jsonify({"error": "Order not found"}), 404
+
+    refresh_error = _refresh_eligibility(order)
+    if refresh_error:
+        return refresh_error
+    if order.customer_id != g.customer.id:
         return jsonify({"error": "Order not found"}), 404
 
     settings = AdminSettings.get()
@@ -151,6 +173,12 @@ def get_order_item(item_id):
     if item.order.customer_id != g.customer.id:
         return jsonify({"error": "Not found"}), 404
 
+    refresh_error = _refresh_eligibility(item.order)
+    if refresh_error:
+        return refresh_error
+    if item.order.customer_id != g.customer.id:
+        return jsonify({"error": "Not found"}), 404
+
     settings = AdminSettings.get()
 
     variants = []
@@ -208,6 +236,11 @@ def _claim_unit(item):
 @login_required
 def submit_exchange(item_id):
     item = OrderItem.query.get_or_404(item_id)
+    if item.order.customer_id != g.customer.id:
+        return jsonify({"error": "Not found"}), 404
+    refresh_error = _refresh_eligibility(item.order)
+    if refresh_error:
+        return refresh_error
     if item.order.customer_id != g.customer.id:
         return jsonify({"error": "Not found"}), 404
     block = item.request_block_reason(AdminSettings.get().return_window_days)
@@ -272,6 +305,11 @@ def submit_exchange(item_id):
 def submit_return(item_id):
     """multipart/form-data: reason, reason_other_text, refund_mode, photo_front, photo_back, pickup_address"""
     item = OrderItem.query.get_or_404(item_id)
+    if item.order.customer_id != g.customer.id:
+        return jsonify({"error": "Not found"}), 404
+    refresh_error = _refresh_eligibility(item.order)
+    if refresh_error:
+        return refresh_error
     if item.order.customer_id != g.customer.id:
         return jsonify({"error": "Not found"}), 404
     block = item.request_block_reason(AdminSettings.get().return_window_days)

@@ -64,11 +64,15 @@ def create_app(config_class=Config):
 
     @app.cli.command("backfill-deliveries")
     def backfill_deliveries():
-        """Refresh original delivery dates for existing cached customers."""
-        from app.models import Customer
-        from app.services.sync_service import sync_orders_for_customer
-        for customer in Customer.query.filter(Customer.shopify_customer_id.isnot(None)).all():
-            sync_orders_for_customer(customer.shopify_customer_id)
+        """Import store orders and confirmed delivery dates, including new customers."""
+        from app.services.store_order_sync import sync_store_orders
+        sync_store_orders()
+
+    @app.cli.command("sync-store-orders")
+    def sync_store_orders_command():
+        """Reconcile recent Shopify orders and deliveries across the store."""
+        from app.services.store_order_sync import sync_store_orders
+        sync_store_orders()
 
     @app.cli.command("backfill-replacements")
     def backfill_replacements():

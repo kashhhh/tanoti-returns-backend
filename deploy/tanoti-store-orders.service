@@ -1,0 +1,16 @@
+[Unit]
+Description=Import Tanoti Shopify orders and confirmed deliveries
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=tanoti
+Group=tanoti
+WorkingDirectory=/var/www/tanoti-returns/backend
+EnvironmentFile=-/etc/tanoti/backend.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/var/www/tanoti-returns/backend/.venv/bin/flask --app run.py sync-store-orders
+TimeoutStartSec=3600
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true

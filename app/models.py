@@ -100,6 +100,7 @@ class Order(db.Model):
 
     fulfilled_at = db.Column(db.DateTime, nullable=True)
     delivered_at = db.Column(db.DateTime, nullable=True)
+    delivery_checked_at = db.Column(db.DateTime, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     customer = db.relationship("Customer", back_populates="orders")
@@ -336,6 +337,19 @@ class AdminSettings(db.Model):
             db.session.add(settings)
             db.session.commit()
         return settings
+
+
+class StoreOrderSync(db.Model):
+    """Durable store-wide import cursor, independent of customer logins."""
+    __tablename__ = "store_order_sync"
+    id = db.Column(db.Integer, primary_key=True)
+    started_at = db.Column(db.DateTime)
+    completed_at = db.Column(db.DateTime)
+    next_page = db.Column(db.Text)
+    running = db.Column(db.Boolean, nullable=False, default=False)
+    processed = db.Column(db.Integer, nullable=False, default=0)
+    skipped = db.Column(db.Integer, nullable=False, default=0)
+    error = db.Column(db.String(255))
 
 
 class AdminAudit(db.Model):

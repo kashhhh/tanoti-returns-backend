@@ -50,6 +50,18 @@ class DeliveryWindowTests(unittest.TestCase):
             for kind in ("return", "exchange"):
                 self.assertEqual(self.submit(kind).status_code, 400)
 
+    def test_september_twenty_six_order_uses_september_thirty_delivery(self):
+        item = db.session.get(OrderItem, self.item_id)
+        item.order.created_at = datetime(2026, 9, 26, 12)
+        item.order.fulfilled_at = datetime(2026, 9, 26, 12)
+        item.delivered_at = datetime(2026, 9, 30, 12)
+        self.assertEqual(item.request_deadline(5), datetime(2026, 10, 5, 12))
+        with patch("app.models.datetime") as clock:
+            clock.utcnow.return_value = datetime(2026, 10, 1, 12)
+            self.assertIsNone(item.request_block_reason(5))
+            clock.utcnow.return_value = datetime(2026, 10, 6, 12)
+            self.assertIn("ended", item.request_block_reason(5))
+
     def test_fulfillment_without_delivery_does_not_start_clock(self):
         item = db.session.get(OrderItem, self.item_id)
         item.delivered_at = None

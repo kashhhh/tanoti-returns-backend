@@ -2,13 +2,14 @@
 from datetime import datetime, timedelta
 from math import ceil
 
-from sqlalchemy import func, or_
+from sqlalchemy import func, or_, and_
 
 from app.extensions import db
 from app.models import AdminSettings, Customer, Order, OrderItem
 
 
 def list_eligible_orders(args):
+    from app.services.store_order_sync import sync_status
     try:
         page = int(args.get("page", 1))
         per_page = int(args.get("per_page", 25))
@@ -53,4 +54,11 @@ def list_eligible_orders(args):
                    for row in rows],
         "page": page, "per_page": per_page, "pages": pages, "total": total,
         "return_window_days": days,
+        "sync": sync_status(),
+        "cached_orders": Order.query.count(),
+        "missing_delivery_orders": Order.query.filter(Order.items.any(and_(
+            OrderItem.delivered_at.is_(None), OrderItem.fulfilled_at.isnot(None),
+            OrderItem.unavailable.is_(False), OrderItem.superseded.is_(False),
+            OrderItem.request_claimed.is_(False), ~OrderItem.return_requests.any(),
+            ~OrderItem.exchange_requests.any()))).count(),
     }

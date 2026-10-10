@@ -1,0 +1,10 @@
+[Unit]
+Description=Refresh Tanoti store orders and deliveries every 15 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=15min
+Unit=tanoti-store-orders.service
+
+[Install]
+WantedBy=timers.target

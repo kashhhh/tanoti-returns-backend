@@ -47,6 +47,8 @@ class MigrationTest(unittest.TestCase):
                     self.assertIn("shopify_updated_at", {c["name"] for c in inspect(db.engine).get_columns("orders")})
                     self.assertIn("challenge", {c["name"] for c in inspect(db.engine).get_columns("otp_tokens")})
                     self.assertIn("shipping_bookings", inspect(db.engine).get_table_names())
+                    self.assertIn("store_order_sync", inspect(db.engine).get_table_names())
+                    self.assertIn("delivery_checked_at", {c["name"] for c in inspect(db.engine).get_columns("orders")})
                     self.assertIn("refund_breakdown", {c["name"] for c in inspect(db.engine).get_columns("return_requests")})
                     self.assertIsNone(db.session.execute(text("SELECT refund_breakdown FROM return_requests WHERE return_number='RET-OLD'")).scalar())
                     self.assertEqual(db.session.execute(text("SELECT net_refund_amount FROM return_requests WHERE return_number='RET-OLD'")).scalar(), 999)

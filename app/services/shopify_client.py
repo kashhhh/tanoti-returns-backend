@@ -19,6 +19,7 @@ import base64
 import hashlib
 import hmac
 import time
+from urllib.parse import urlsplit
 
 import requests
 from flask import current_app
@@ -99,8 +100,34 @@ def find_customer_by_email(email: str):
 
 
 FULFILLMENT_DELIVERY_QUERY = '''query($ids: [ID!]!) {
-  nodes(ids: $ids) { ... on Fulfillment { id deliveredAt } }
+  nodes(ids: $ids) { ... on Fulfillment { id deliveredAt displayStatus } }
 }'''
+
+FULFILLMENT_EVENTS_QUERY = '''query($id: ID!, $after: String) {
+  fulfillment(id: $id) {
+    events(first: 50, after: $after, sortKey: HAPPENED_AT) {
+      nodes { status happenedAt } pageInfo { hasNextPage endCursor }
+    }
+  }
+}'''
+
+
+def _confirmed_delivery_event(fulfillment_id):
+    cursor = None
+    seen = set()
+    while True:
+        result = graphql(FULFILLMENT_EVENTS_QUERY, {"id": fulfillment_id, "after": cursor})
+        events = result["fulfillment"]["events"]
+        delivered = [event["happenedAt"] for event in events["nodes"] if event["status"] == "DELIVERED"]
+        if delivered:
+            # Events are ordered by happenedAt, not by webhook creation time.
+            return delivered[0]
+        if not events["pageInfo"]["hasNextPage"]:
+            return None
+        cursor = events["pageInfo"]["endCursor"]
+        if not cursor or cursor in seen:
+            raise ValueError("Shopify fulfillment event pagination did not advance")
+        seen.add(cursor)
 
 
 def fetch_fulfillment_delivery_dates(fulfillment_ids):
@@ -114,8 +141,33 @@ def fetch_fulfillment_delivery_dates(fulfillment_ids):
         nodes = result["nodes"]
         if len(nodes) != len(batch) or any(node is None for node in nodes):
             raise ValueError("Shopify fulfillment delivery lookup was incomplete")
-        dates.update({node["id"].rsplit("/", 1)[-1]: node["deliveredAt"] for node in nodes})
+        for node in nodes:
+            delivered = node["deliveredAt"]
+            if not delivered and node.get("displayStatus") == "DELIVERED":
+                delivered = _confirmed_delivery_event(node["id"])
+            dates[node["id"].rsplit("/", 1)[-1]] = delivered
     return dates
+
+
+def _order_page(url, params=None, *, expected_path=None):
+    """Follow only Shopify's own same-origin order pagination links."""
+    expected = urlsplit(_base_url() + "/orders.json")
+    parsed = urlsplit(url)
+    if (parsed.scheme, parsed.netloc) != (expected.scheme, expected.netloc) or parsed.username or parsed.password:
+        raise ValueError("Unexpected Shopify order pagination origin")
+    if parsed.path != (expected_path or expected.path):
+        raise ValueError("Unexpected Shopify order pagination path")
+    response = requests.get(url, headers=_headers(), params=params, timeout=20)
+    response.raise_for_status()
+    next_url = response.links.get("next", {}).get("url")
+    if next_url == url:
+        raise ValueError("Shopify order pagination did not advance")
+    return response.json()["orders"], next_url
+
+
+def fetch_store_orders_page(next_url=None, *, since=None):
+    params = {"status": "any", "limit": 25, "created_at_min": since} if not next_url else None
+    return _order_page(next_url or _base_url() + "/orders.json", params)
 
 
 def fetch_order(order_id: str):
@@ -152,14 +204,18 @@ def fetch_gift_card(card_id: str):
 def fetch_orders_for_customer(shopify_customer_id: str):
     """Pulls orders for a customer -- used by the sync job / on-demand
     refresh so the local Order/OrderItem cache stays current."""
-    resp = requests.get(
-        f"{_base_url()}/customers/{shopify_customer_id}/orders.json",
-        headers=_headers(),
-        params={"status": "any"},
-        timeout=10,
-    )
-    resp.raise_for_status()
-    return resp.json().get("orders", [])
+    url = f"{_base_url()}/customers/{shopify_customer_id}/orders.json"
+    params = {"status": "any", "limit": 250}
+    orders, seen = [], set()
+    while url:
+        if url in seen:
+            raise ValueError("Shopify order pagination did not advance")
+        seen.add(url)
+        batch, url = _order_page(url, params, expected_path=urlsplit(
+            f"{_base_url()}/customers/{shopify_customer_id}/orders.json").path)
+        orders.extend(batch)
+        params = None
+    return orders
 
 def get_product_image_url(shopify_product_id: str, variant_id=None):
     """Order line items don't include image data in Shopify's REST API --

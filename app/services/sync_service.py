@@ -3,7 +3,7 @@ Turns a Shopify order payload (from a webhook or a REST pull) into local
 Customer / Order / OrderItem rows. Idempotent: re-running with the same
 order just updates the existing rows rather than duplicating them.
 """
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import hashlib
 
 from sqlalchemy import text
@@ -26,13 +26,15 @@ def _parse_payment_method(shopify_order: dict) -> PaymentMethod:
     return PaymentMethod.PREPAID
 
 
-def _sync_delivery_dates(order, fulfillments):
+def _sync_delivery_dates(order, fulfillments, delivery_cache=None):
     """Map each parcel's confirmed delivery to its physical units."""
     from app.services import shopify_client
     valid = sorted((f for f in fulfillments if f.get("status") not in
                     ("cancelled", "failure", "error")), key=lambda f: f.get("created_at") or "")
-    remote = shopify_client.fetch_fulfillment_delivery_dates(
-        [f["id"] for f in valid if f.get("id")])
+    remote = {} if delivery_cache is None else delivery_cache
+    missing = [f["id"] for f in valid if f.get("id") and str(f["id"]) not in remote]
+    if missing:
+        remote.update(shopify_client.fetch_fulfillment_delivery_dates(missing))
     unit_dates = {}
     for fulfillment in valid:
         value = remote.get(str(fulfillment.get("id"))) if fulfillment.get("id") else fulfillment.get("delivered_at")
@@ -46,6 +48,7 @@ def _sync_delivery_dates(order, fulfillments):
         item.delivered_at = dates[item.unit_number - 1] if item.unit_number <= len(dates) else None
     dates = [item.delivered_at for item in order.items if item.delivered_at and not item.replacement_for]
     order.delivered_at = min(dates) if dates else None
+    order.delivery_checked_at = datetime.utcnow()
 
 
 def _customer_lock_key(value: str) -> int:
@@ -95,7 +98,8 @@ def upsert_customer(shopify_customer: dict) -> Customer:
     return customer
 
 
-def upsert_order(shopify_order: dict, _image_cache: dict = None, *, commit=True) -> Order:
+def upsert_order(shopify_order: dict, _image_cache: dict = None, *, commit=True,
+                 delivery_cache=None, refresh_images=True) -> Order:
     from app.services import shopify_client
     from app.security import lock_login
 
@@ -107,8 +111,9 @@ def upsert_order(shopify_order: dict, _image_cache: dict = None, *, commit=True)
         # Delivery can change without a newer order updated_at. Do not replay
         # stale order fields, but refresh delivery on an equal current snapshot.
         if incoming_at == order.shopify_updated_at and "fulfillments" in shopify_order:
-            _sync_delivery_dates(order, shopify_order["fulfillments"] or [])
-        refresh_item_images(order.items, _image_cache)
+            _sync_delivery_dates(order, shopify_order["fulfillments"] or [], delivery_cache)
+        if refresh_images:
+            refresh_item_images(order.items, _image_cache)
         if commit:
             db.session.commit()
         return order
@@ -183,7 +188,7 @@ def upsert_order(shopify_order: dict, _image_cache: dict = None, *, commit=True)
             # Existing requests own their reserved units. External refunds are conservatively blocked.
             item.unavailable = bool(shopify_order.get("cancelled_at")) or refunded > 0 or (mapping_pending and (not existing or item.unavailable))
             product_id = item.shopify_product_id
-            if product_id:
+            if product_id and refresh_images:
                 refresh_item_images([item], _image_cache)
         for unit, item in existing.items():
             if unit > count:
@@ -196,7 +201,7 @@ def upsert_order(shopify_order: dict, _image_cache: dict = None, *, commit=True)
 
     db.session.flush()
     if "fulfillments" in shopify_order:
-        _sync_delivery_dates(order, fulfillments)
+        _sync_delivery_dates(order, fulfillments, delivery_cache)
     if commit:
         db.session.commit()
     else:
@@ -213,6 +218,24 @@ def sync_orders_for_customer(shopify_customer_id: str):
     image_cache = {}
     for o in orders:
         upsert_order(o, _image_cache=image_cache)
+
+
+def refresh_customer_orders_if_stale(customer):
+    """Recheck delivery before presenting old eligibility as current."""
+    cutoff = datetime.utcnow() - timedelta(minutes=15)
+    if customer.shopify_customer_id and any(order.shopify_updated_at and
+            (not order.delivery_checked_at or order.delivery_checked_at < cutoff) for order in customer.orders):
+        sync_orders_for_customer(customer.shopify_customer_id)
+
+
+def refresh_order_if_stale(order):
+    cutoff = datetime.utcnow() - timedelta(minutes=15)
+    if order.shopify_updated_at and (not order.delivery_checked_at or order.delivery_checked_at < cutoff):
+        from app.services import shopify_client
+        payload = shopify_client.fetch_order(order.shopify_order_id)
+        if str(payload.get("id")) != order.shopify_order_id:
+            raise ValueError("Fetched order identity did not match")
+        upsert_order(payload)
 
 
 def refresh_item_images(items, cache=None):

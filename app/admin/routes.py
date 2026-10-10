@@ -29,6 +29,17 @@ def eligible_orders():
         return jsonify({"error": str(exc)}), 400
 
 
+@admin_bp.post("/eligible-orders/sync")
+@admin_required
+def sync_eligible_orders():
+    from app.services.store_order_sync import sync_store_batch
+    try:
+        return jsonify(sync_store_batch())
+    except Exception:
+        current_app.logger.warning("Store-wide Shopify order import failed")
+        return jsonify(error="Could not sync Shopify orders. Retry to resume the import."), 503
+
+
 def _repeat_returner_flag(customer_id: int) -> bool:
     from datetime import timedelta
     cutoff = datetime.utcnow() - timedelta(days=90)

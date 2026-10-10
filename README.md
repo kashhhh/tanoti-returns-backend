@@ -1,4 +1,4 @@
-Delivery-based return windows and rollout: **[DELIVERY_WINDOW_FIX.md](DELIVERY_WINDOW_FIX.md)**. Apply migrations through `g18c72d4a901` and backfill delivery dates before deploying this version.
+Delivery-based return windows and rollout: **[DELIVERY_WINDOW_FIX.md](DELIVERY_WINDOW_FIX.md)**. Apply migrations through `h29d83e5b012` and run `sync-store-orders` before serving this version.
 
 Delhivery automatic collections and replacement shipping: **[DELHIVERY_SETUP.md](DELHIVERY_SETUP.md)**.
 
@@ -17,9 +17,12 @@ date, earliest remaining return deadline, and eligible item count. Search matche
 order IDs, customer names, and emails. Split deliveries show the earliest and
 latest eligible delivery dates. The admin-only `GET /api/admin/eligible-orders`
 endpoint supports `q`, `page`, and `per_page` (10/25/50, default 25), with earliest
-deadlines first. Refresh recalculates eligibility using the current settings and
-synced delivery dates. Complete the delivery backfill described above so existing
-orders have confirmed delivery timestamps.
+deadlines first. The page automatically reconciles recent store orders when its
+last completed import is stale, independently of customer logins. **Sync Shopify
+orders** calls the admin-only `POST /api/admin/eligible-orders/sync` once per page
+until the import completes. Progress, missing delivery confirmations, source store,
+and the last completed import are displayed. `sync-store-orders` and the provided
+15-minute systemd timer keep the cache current without an open admin browser.
 
 The admin UI opens on Needs review, oldest first, with 25 records per page. The
 request list is paginated in SQL across returns and exchanges together. Query options
