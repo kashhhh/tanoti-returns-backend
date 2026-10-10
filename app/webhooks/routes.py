@@ -24,7 +24,7 @@ def _receive(topic):
     payload = request.get_json(silent=True)
     if not isinstance(payload, dict):
         return jsonify({"error": "Expected an order or fulfillment object"}), 400
-    ident = payload.get("order_id" if topic == "fulfillments/create" else "id")
+    ident = payload.get("order_id" if topic.startswith("fulfillments/") else "id")
     if not re.fullmatch(r"[1-9][0-9]{0,19}", str(ident)):
         return jsonify({"error": "Invalid order ID"}), 400
     # HMAC signs only the body. A captured body with a changed delivery ID must
@@ -34,7 +34,7 @@ def _receive(topic):
     if db.session.get(WebhookReceipt, fingerprint):
         return jsonify({"ok": True, "duplicate": True})
     try:
-        if topic == "fulfillments/create":
+        if topic.startswith("fulfillments/"):
             payload = shopify_client.fetch_order(str(ident))
             if str(payload.get("id")) != str(ident):
                 raise ValueError("Fetched order identity did not match")
@@ -65,3 +65,8 @@ def orders_updated():
 @webhooks_bp.post("/fulfillments-create")
 def fulfillments_create():
     return _receive("fulfillments/create")
+
+
+@webhooks_bp.post("/fulfillments-update")
+def fulfillments_update():
+    return _receive("fulfillments/update")

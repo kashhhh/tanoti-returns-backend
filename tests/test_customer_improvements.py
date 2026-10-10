@@ -18,7 +18,7 @@ class CustomerImprovementsTests(unittest.TestCase):
         return {"id": "100", "order_number": "100", "email": "customer@example.com",
                 "customer": {"id": "10", "email": "customer@example.com"},
                 "line_items": [{"id": "1", "title": "Shirt", "quantity": 1, "price": "999"}],
-                "fulfillments": [{"created_at": datetime.utcnow().isoformat(), "status": "success",
+                "fulfillments": [{"created_at": datetime.utcnow().isoformat(), "delivered_at": datetime.utcnow().isoformat(), "status": "success",
                                   "line_items": [{"id": "1", "quantity": 1}]}]}
 
     def order_login(self):
@@ -39,7 +39,7 @@ class CustomerImprovementsTests(unittest.TestCase):
                 if state == "unfulfilled":
                     order["fulfillments"] = []
                 if state == "expired":
-                    order["fulfillments"][0]["created_at"] = (datetime.utcnow() - timedelta(days=365)).isoformat()
+                    order["fulfillments"][0]["delivered_at"] = (datetime.utcnow() - timedelta(days=365)).isoformat()
                 if state == "cancelled":
                     order["cancelled_at"] = datetime.utcnow().isoformat()
                 if state == "refunded":

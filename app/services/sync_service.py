@@ -26,6 +26,28 @@ def _parse_payment_method(shopify_order: dict) -> PaymentMethod:
     return PaymentMethod.PREPAID
 
 
+def _sync_delivery_dates(order, fulfillments):
+    """Map each parcel's confirmed delivery to its physical units."""
+    from app.services import shopify_client
+    valid = sorted((f for f in fulfillments if f.get("status") not in
+                    ("cancelled", "failure", "error")), key=lambda f: f.get("created_at") or "")
+    remote = shopify_client.fetch_fulfillment_delivery_dates(
+        [f["id"] for f in valid if f.get("id")])
+    unit_dates = {}
+    for fulfillment in valid:
+        value = remote.get(str(fulfillment.get("id"))) if fulfillment.get("id") else fulfillment.get("delivered_at")
+        delivered = _utc(value) if value else None
+        for line in fulfillment.get("line_items", []):
+            unit_dates.setdefault(str(line["id"]), []).extend([delivered] * int(line.get("quantity", 0)))
+    for item in order.items:
+        if item.replacement_for:
+            continue  # Replacement delivery is owned by the exchange workflow.
+        dates = unit_dates.get(item.shopify_line_item_id, [])
+        item.delivered_at = dates[item.unit_number - 1] if item.unit_number <= len(dates) else None
+    dates = [item.delivered_at for item in order.items if item.delivered_at and not item.replacement_for]
+    order.delivered_at = min(dates) if dates else None
+
+
 def _customer_lock_key(value: str) -> int:
     """Return a stable signed bigint suitable for a Postgres advisory lock."""
     digest = hashlib.sha256(value.encode("utf-8")).digest()[:8]
@@ -82,6 +104,10 @@ def upsert_order(shopify_order: dict, _image_cache: dict = None, *, commit=True)
     order = Order.query.filter_by(shopify_order_id=order_id).with_for_update().first()
     incoming_at = _utc(shopify_order["updated_at"]) if shopify_order.get("updated_at") else None
     if order and order.shopify_updated_at and (not incoming_at or incoming_at <= order.shopify_updated_at):
+        # Delivery can change without a newer order updated_at. Do not replay
+        # stale order fields, but refresh delivery on an equal current snapshot.
+        if incoming_at == order.shopify_updated_at and "fulfillments" in shopify_order:
+            _sync_delivery_dates(order, shopify_order["fulfillments"] or [])
         refresh_item_images(order.items, _image_cache)
         if commit:
             db.session.commit()
@@ -111,7 +137,7 @@ def upsert_order(shopify_order: dict, _image_cache: dict = None, *, commit=True)
 
     fulfillments = shopify_order.get("fulfillments") or []
     if fulfillments:
-        # Use the earliest fulfillment date as the return-window start.
+        # Fulfillment remains shipment metadata; delivery owns eligibility.
         dates = [f["created_at"] for f in fulfillments if f.get("created_at")]
         if dates:
             order.fulfilled_at = _utc(min(dates))
@@ -168,6 +194,9 @@ def upsert_order(shopify_order: dict, _image_cache: dict = None, *, commit=True)
             if not item.replacement_for and item.shopify_line_item_id not in line_ids:
                 item.unavailable = True
 
+    db.session.flush()
+    if "fulfillments" in shopify_order:
+        _sync_delivery_dates(order, fulfillments)
     if commit:
         db.session.commit()
     else:

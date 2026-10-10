@@ -1,4 +1,6 @@
-Delhivery automatic collections and replacement shipping: **[DELHIVERY_SETUP.md](DELHIVERY_SETUP.md)**. Apply migrations through `f63d029c471a` before deploying this version.
+Delivery-based return windows and rollout: **[DELIVERY_WINDOW_FIX.md](DELIVERY_WINDOW_FIX.md)**. Apply migrations through `g18c72d4a901` and backfill delivery dates before deploying this version.
+
+Delhivery automatic collections and replacement shipping: **[DELHIVERY_SETUP.md](DELHIVERY_SETUP.md)**.
 
 Latest customer features and deployment steps: **[FEATURE_UPDATE.md](FEATURE_UPDATE.md)**. Native Shopify return/restock sync is now disabled; order imports and gift cards remain active.
 
@@ -7,6 +9,17 @@ Current security/deployment instructions: **[SECURITY.md](SECURITY.md)**. They s
 For local development, explicitly set `APP_ENV=development`, `TRUST_PROXY=false`, a randomly generated `SECRET_KEY` of at least 32 characters, and `TESTING_MODE=true` if console OTP delivery is needed. Real Shopify operations remain live.
 
 ## Request dashboard and customer navigation
+
+The admin navigation includes **Orders eligible for returns** at
+`/admin/eligible-orders`. It lists each synced order once when at least one unit
+is eligible, showing order number/Shopify ID, customer name, confirmed delivery
+date, earliest remaining return deadline, and eligible item count. Search matches
+order IDs, customer names, and emails. Split deliveries show the earliest and
+latest eligible delivery dates. The admin-only `GET /api/admin/eligible-orders`
+endpoint supports `q`, `page`, and `per_page` (10/25/50, default 25), with earliest
+deadlines first. Refresh recalculates eligibility using the current settings and
+synced delivery dates. Complete the delivery backfill described above so existing
+orders have confirmed delivery timestamps.
 
 The admin UI opens on Needs review, oldest first, with 25 records per page. The
 request list is paginated in SQL across returns and exchanges together. Query options

@@ -53,7 +53,7 @@ class WorkflowTests(unittest.TestCase):
         order = Order(shopify_order_id="100", order_number="100", customer=customer,
                       payment_method=PaymentMethod.PREPAID, shipping_address=ADDRESS,
                       fulfilled_at=datetime.utcnow())
-        item = OrderItem(order=order, shopify_line_item_id="1", product_title="Shirt <b>red</b>", price=999, size="S")
+        item = OrderItem(order=order, shopify_line_item_id="1", product_title="Shirt <b>red</b>", price=999, size="S", delivered_at=datetime.utcnow())
         db.session.add(item); db.session.commit()
         self.item_id = item.id
         self.customer_headers = session_headers("customer", customer.id, customer.email)
@@ -483,7 +483,7 @@ class WorkflowTests(unittest.TestCase):
                 self.assertEqual(next(r for r in customer if r["number"] == number)["customer_note"], note)
                 # A new physical unit is required; rejection no longer reopens the original.
                 original = db.session.get(OrderItem, self.item_id)
-                fresh = OrderItem(order_id=original.order_id, shopify_line_item_id="note-test-next", product_title=original.product_title, price=999, size="S")
+                fresh = OrderItem(order_id=original.order_id, shopify_line_item_id="note-test-next", product_title=original.product_title, price=999, size="S", delivered_at=datetime.utcnow())
                 db.session.add(fresh)
                 db.session.commit()
                 self.item_id = fresh.id

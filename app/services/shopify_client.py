@@ -98,6 +98,26 @@ def find_customer_by_email(email: str):
                  if (customer.get("email") or "").strip().lower() == email.strip().lower()), None)
 
 
+FULFILLMENT_DELIVERY_QUERY = '''query($ids: [ID!]!) {
+  nodes(ids: $ids) { ... on Fulfillment { id deliveredAt } }
+}'''
+
+
+def fetch_fulfillment_delivery_dates(fulfillment_ids):
+    """REST order snapshots omit deliveredAt; read the actual delivery clock."""
+    ids = list(dict.fromkeys(str(value) for value in fulfillment_ids))
+    dates = {}
+    for offset in range(0, len(ids), 250):
+        batch = ids[offset:offset + 250]
+        result = graphql(FULFILLMENT_DELIVERY_QUERY,
+                         {"ids": [f"gid://shopify/Fulfillment/{value}" for value in batch]})
+        nodes = result["nodes"]
+        if len(nodes) != len(batch) or any(node is None for node in nodes):
+            raise ValueError("Shopify fulfillment delivery lookup was incomplete")
+        dates.update({node["id"].rsplit("/", 1)[-1]: node["deliveredAt"] for node in nodes})
+    return dates
+
+
 def fetch_order(order_id: str):
     resp = requests.get(f"{_base_url()}/orders/{order_id}.json", headers=_headers(), timeout=10)
     resp.raise_for_status()

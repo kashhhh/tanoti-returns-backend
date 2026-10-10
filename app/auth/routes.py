@@ -209,7 +209,9 @@ def verify_otp():
 
     # First-time login: pull their order history so it's ready to browse.
     # (Subsequent syncs happen via webhooks + the manual /resync endpoint.)
-    if not customer.orders or any(not order.shipping_address for order in customer.orders):
+    if not customer.orders or any(not order.shipping_address or
+            any(not item.delivered_at and not item.replacement_for and not item.unavailable
+                for item in order.items) for order in customer.orders):
         sync_service.sync_orders_for_customer(customer.shopify_customer_id)
     else:
         try:

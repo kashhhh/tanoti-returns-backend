@@ -19,6 +19,16 @@ from app.services.request_listing import list_page
 admin_bp = Blueprint("admin", __name__)
 
 
+@admin_bp.get("/eligible-orders")
+@admin_required
+def eligible_orders():
+    from app.services.eligible_orders import list_eligible_orders
+    try:
+        return jsonify(list_eligible_orders(request.args))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
 def _repeat_returner_flag(customer_id: int) -> bool:
     from datetime import timedelta
     cutoff = datetime.utcnow() - timedelta(days=90)

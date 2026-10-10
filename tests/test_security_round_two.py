@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from unittest.mock import patch
 
 from app.extensions import db
-from app.models import AuthSession, Customer, GiftCardIssuance, Notification, Order, ReturnRequest, WebhookReceipt
+from app.models import AuthSession, Customer, GiftCardIssuance, Notification, Order, OrderItem, ReturnRequest, WebhookReceipt
 from app.utils.sessions import cookie_name, digest
 import test_workflows as fixtures
 
@@ -106,7 +106,7 @@ class RoundTwoTests(unittest.TestCase):
         signature = base64.b64encode(hmac.new(b"test-webhook-secret", body, hashlib.sha256).digest()).decode()
         metadata = {"X-Shopify-Hmac-Sha256": signature, "X-Shopify-Shop-Domain": "test.myshopify.com",
                     "X-Shopify-Topic": topic, "X-Shopify-Webhook-Id": delivery, **headers}
-        endpoint = {"orders/updated": "orders-updated", "orders/create": "orders-create", "fulfillments/create": "fulfillments-create"}[topic]
+        endpoint = {"orders/updated": "orders-updated", "orders/create": "orders-create", "fulfillments/create": "fulfillments-create", "fulfillments/update": "fulfillments-update"}[topic]
         return self.client.post("/api/webhooks/shopify/" + endpoint, data=body, content_type="application/json", headers=metadata)
 
     def order_payload(self, **changes):
@@ -151,6 +151,18 @@ class RoundTwoTests(unittest.TestCase):
         with patch("app.services.shopify_client.fetch_order", side_effect=RuntimeError("Shopify unavailable")):
             self.assertEqual(self.webhook({"order_id": 100}, topic="fulfillments/create").status_code, 503)
         self.assertEqual(WebhookReceipt.query.count(), 0)
+
+    def test_delivery_update_webhook_fetches_current_order_and_retries_failures(self):
+        payload = self.order_payload(fulfillments=[{"id": 55, "status": "success",
+            "created_at": "2026-09-24T12:00:00Z", "line_items": [{"id": 1, "quantity": 1}]}])
+        with patch("app.services.shopify_client.fetch_order", return_value=payload), \
+                patch("app.services.shopify_client.fetch_fulfillment_delivery_dates", side_effect=RuntimeError("unavailable")):
+            self.assertEqual(self.webhook({"order_id": 100}, topic="fulfillments/update").status_code, 503)
+        self.assertEqual(WebhookReceipt.query.count(), 0)
+        with patch("app.services.shopify_client.fetch_order", return_value=payload), \
+                patch("app.services.shopify_client.fetch_fulfillment_delivery_dates", return_value={"55": "2026-10-06T12:00:00Z"}):
+            self.assertEqual(self.webhook({"order_id": 100}, topic="fulfillments/update").status_code, 200)
+        self.assertEqual(db.session.get(OrderItem, self.item_id).delivered_at, datetime(2026, 10, 6, 12))
 
     def ready_refund(self):
         number = self.submit().json["return_number"]

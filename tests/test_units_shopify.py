@@ -37,7 +37,7 @@ class UnitAndShopifyTests(unittest.TestCase):
     def test_return_window_is_enforced_on_direct_submissions(self):
         item = db.session.get(OrderItem,self.item_id)
         for fulfilled in (None, datetime.utcnow()-timedelta(days=100)):
-            item.order.fulfilled_at = fulfilled
+            item.delivered_at = fulfilled
             db.session.commit()
             for kind in ("return","exchange"):
                 self.assertEqual(self.submit(kind).status_code,400)
@@ -67,7 +67,7 @@ class UnitAndShopifyTests(unittest.TestCase):
 
     def test_two_purchased_units_are_distinct_and_resync_is_idempotent(self):
         payload={"id":100,"order_number":100,"customer":{"id":1,"email":"customer@example.com"},
-            "fulfillments":[{"created_at":datetime.utcnow().isoformat()+"Z","line_items":[{"id":1,"quantity":2}]}],
+            "fulfillments":[{"created_at":datetime.utcnow().isoformat()+"Z","delivered_at":datetime.utcnow().isoformat()+"Z","line_items":[{"id":1,"quantity":2}]}],
             "line_items":[{"id":1,"title":"Shirt","price":"999","quantity":2}]}
         upsert_order(payload)
         ids=[i.id for i in OrderItem.query.order_by(OrderItem.id)]

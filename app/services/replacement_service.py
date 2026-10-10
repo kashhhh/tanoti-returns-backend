@@ -9,6 +9,7 @@ def ensure_replacement(req):
     if existing:
         if req.delivered_at:
             existing.fulfilled_at = req.delivered_at
+            existing.delivered_at = req.delivered_at
             existing.fulfillment_known = True
             existing.unavailable = False
         return existing
@@ -31,6 +32,7 @@ def ensure_replacement(req):
     item.image_url = original.image_url
     item.replacement_for = req.exchange_number
     item.fulfilled_at = req.delivered_at
+    item.delivered_at = req.delivered_at
     item.fulfillment_known = True
     item.unavailable = req.delivered_at is None
     db.session.add(item)

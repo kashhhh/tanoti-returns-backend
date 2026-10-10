@@ -98,17 +98,18 @@ class Order(db.Model):
     financial_status = db.Column(db.String(32))       # paid / pending / refunded etc, from Shopify
     shipping_address = db.Column(db.JSON, nullable=True)
 
-    fulfilled_at = db.Column(db.DateTime, nullable=True)   # return window clock starts here
+    fulfilled_at = db.Column(db.DateTime, nullable=True)
+    delivered_at = db.Column(db.DateTime, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     customer = db.relationship("Customer", back_populates="orders")
     items = db.relationship("OrderItem", back_populates="order", cascade="all, delete-orphan")
 
     def return_window_deadline(self, window_days: int):
-        if not self.fulfilled_at:
+        if not self.delivered_at:
             return None
         from datetime import timedelta
-        return self.fulfilled_at + timedelta(days=window_days)
+        return self.delivered_at + timedelta(days=window_days)
 
     def is_within_return_window(self, window_days: int) -> bool:
         deadline = self.return_window_deadline(window_days)
@@ -134,6 +135,7 @@ class OrderItem(db.Model):
     unit_number = db.Column(db.Integer, nullable=False, default=1)
     line_quantity = db.Column(db.Integer, nullable=False, default=1)
     fulfilled_at = db.Column(db.DateTime, nullable=True)
+    delivered_at = db.Column(db.DateTime, nullable=True)
     fulfillment_known = db.Column(db.Boolean, nullable=False, default=False)
     superseded = db.Column(db.Boolean, nullable=False, default=False)
     unavailable = db.Column(db.Boolean, nullable=False, default=False)
@@ -149,7 +151,7 @@ class OrderItem(db.Model):
 
     def request_deadline(self, days):
         from datetime import timedelta
-        start = self.fulfilled_at if self.fulfillment_known else self.order.fulfilled_at
+        start = self.delivered_at
         return start + timedelta(days=days) if start else None
 
     def request_block_reason(self, days):
@@ -159,7 +161,7 @@ class OrderItem(db.Model):
             return "This unit is no longer available for return or exchange."
         deadline = self.request_deadline(days)
         if not deadline:
-            return "This unit has not been fulfilled yet."
+            return "Available after delivery is confirmed for this unit."
         if datetime.utcnow() > deadline:
             return "The return window for this unit has ended."
         return None
@@ -322,7 +324,7 @@ class AdminSettings(db.Model):
     __tablename__ = "admin_settings"
 
     id = db.Column(db.Integer, primary_key=True)
-    return_window_days = db.Column(db.Integer, nullable=False, default=14)
+    return_window_days = db.Column(db.Integer, nullable=False, default=5)
     deduction_enabled = db.Column(db.Boolean, nullable=False, default=False)
     deduction_amount = db.Column(db.Numeric(10, 2), nullable=False, default=0)
 

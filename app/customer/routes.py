@@ -40,8 +40,9 @@ def _item_payload(item: OrderItem, window_days: int, eligible: bool):
         "image_url": item.image_url,
         "order_number": item.order.order_number,
         "eligible": block is None,
-        "fulfilled": deadline is not None,
-        "return_deadline": deadline.isoformat() if deadline else None,
+        "fulfilled": bool(item.fulfilled_at if item.fulfillment_known else item.order.fulfilled_at),
+        "delivered": item.delivered_at is not None,
+        "return_deadline": deadline.isoformat() + "Z" if deadline else None,
         "pending": active is not None,
         "status": active.status.value if active else None,
     }

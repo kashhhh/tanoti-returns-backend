@@ -62,6 +62,14 @@ def create_app(config_class=Config):
         from app.services.shopify_returns import retry_pending
         retry_pending()
 
+    @app.cli.command("backfill-deliveries")
+    def backfill_deliveries():
+        """Refresh original delivery dates for existing cached customers."""
+        from app.models import Customer
+        from app.services.sync_service import sync_orders_for_customer
+        for customer in Customer.query.filter(Customer.shopify_customer_id.isnot(None)).all():
+            sync_orders_for_customer(customer.shopify_customer_id)
+
     @app.cli.command("backfill-replacements")
     def backfill_replacements():
         from app.models import ExchangeRequest
