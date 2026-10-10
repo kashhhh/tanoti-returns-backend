@@ -318,5 +318,8 @@ Returns and exchanges accept an optional `customer_note` field (maximum 2,000 ch
 See `SHOPIFY_SYNC_SETUP.md` for the unit-splitting migration, delivered replacement backfill, Shopify scopes, retry command and financial-reconciliation limitations. `.env` was not changed.
 # WhatsApp customer login
 
+GitHub Actions backend testing and deployment: see [BACKEND_DEPLOYMENT.md](BACKEND_DEPLOYMENT.md)
+for the production environment secrets and one-time VPS access setup.
+
 Customers can choose email or their registered WhatsApp number for login codes.
 See [WhatsApp login setup](WHATSAPP_LOGIN.md) for backend configuration and deployment.

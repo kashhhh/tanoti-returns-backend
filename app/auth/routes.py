@@ -113,6 +113,20 @@ def request_otp():
     if not shopify_customer or not shopify_customer.get("id") or _email(shopify_customer) != email:
         return _delivery_options() if options_only else _sent_response(channel=channel)
 
+    # Order payloads may omit the linked customer's account phone. Resolve it
+    # for both the chooser and WhatsApp sends/resends, without using order contacts.
+    if (order_id is not None and (options_only or channel == "whatsapp")
+            and whatsapp_service.is_configured()
+            and not whatsapp_service.registered_phone(shopify_customer)):
+        try:
+            account = shopify_client.find_customer_by_email(email)
+        except Exception:
+            current_app.logger.warning("Order login customer contact lookup unavailable")
+            return jsonify({"error": "Login is temporarily unavailable. Please try again shortly."}), 503
+        if (account and str(account.get("id")) == str(shopify_customer["id"])
+                and _email(account) == email):
+            shopify_customer = account
+
     if options_only:
         return _delivery_options(shopify_customer)
 

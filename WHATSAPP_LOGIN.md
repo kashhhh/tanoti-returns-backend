@@ -11,6 +11,12 @@ shared login IP/email limits. Email remains the default. Requests and resends
 include `channel: "email"` or `channel: "whatsapp"`; omitted channels retain
 the previous email behavior. Admin login remains email-only.
 
+Order ID login supports WhatsApp selection, sending, resending and code verification.
+If the order response omits a usable customer phone, the backend looks up the
+linked customer account by email and verifies that both its customer ID and email
+match before using its registered phone. This applies to the delivery chooser and
+WhatsApp sends/resends; order and shipping contact numbers are never used.
+
 WhatsApp uses Meta Cloud API, matching the existing Tanoti WhatsApp app.
 Configure these **backend-only** environment variables on every deployment:
 

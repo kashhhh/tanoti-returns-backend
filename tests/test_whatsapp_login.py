@@ -151,7 +151,8 @@ class WhatsAppLoginTests(unittest.TestCase):
         order = customer_fixtures.CustomerImprovementsTests.login_order_payload(self)
         for phone in (None, "+919876543210"):
             order["customer"]["phone"] = phone
-            with patch("app.auth.routes.shopify_client.find_order_for_login", return_value=order):
+            with patch("app.auth.routes.shopify_client.find_order_for_login", return_value=order), \
+                    patch("app.auth.routes.shopify_client.find_customer_by_email", return_value=order["customer"]):
                 result = self.client.post("/api/auth/delivery-options", json={"order_id": "100"})
             self.assertEqual(result.json["channels"], ["email", "whatsapp"] if phone else ["email"])
         order["fulfillments"] = []
@@ -159,6 +160,48 @@ class WhatsAppLoginTests(unittest.TestCase):
             result = self.client.post("/api/auth/delivery-options", json={"order_id": "100"})
         self.assertEqual(result.json, {"channels": ["email"]})
         self.assertEqual(OTPToken.query.count(), 0)
+
+    def test_order_whatsapp_resolves_account_phone_for_options_send_resend_and_verify(self):
+        order = customer_fixtures.CustomerImprovementsTests.login_order_payload(self)
+        order["phone"] = "+12025550123"
+        account = {**order["customer"], "phone": "+919876543210"}
+        with patch("app.auth.routes.shopify_client.find_order_for_login", return_value=order), \
+                patch("app.auth.routes.shopify_client.find_customer_by_email", return_value=account), \
+                patch("app.auth.routes.whatsapp_service.send_otp_whatsapp") as send, \
+                patch("app.auth.routes.email_service.send_otp_email") as email:
+            options = self.client.post("/api/auth/delivery-options", json={"order_id": "#100"})
+            self.assertEqual(options.json, {"channels": ["email", "whatsapp"]})
+            send.assert_not_called()
+            self.assertEqual(OTPToken.query.count(), 0)
+            first = self.client.post("/api/auth/request-otp", json={"order_id": "#100", "channel": "whatsapp"})
+            self.assertEqual(first.status_code, 200)
+            self.assertEqual(send.call_args.args[0], account["phone"])
+            self.assertEqual(self.client.post("/api/auth/resend-otp", json={"order_id": "100", "channel": "whatsapp"}).status_code, 429)
+            OTPToken.query.one().created_at -= timedelta(seconds=31)
+            db.session.commit()
+            resend = self.client.post("/api/auth/resend-otp", json={"order_id": "100", "channel": "whatsapp"})
+            self.assertEqual(resend.status_code, 200)
+            email.assert_not_called()
+            self.assertEqual(send.call_args.args[0], account["phone"])
+            code = send.call_args.args[1]
+            self.assertEqual(self.client.post("/api/auth/verify-otp", json={"challenge": first.json["challenge"], "otp": code}).status_code, 400)
+            self.assertEqual(self.client.post("/api/auth/verify-otp", json={"challenge": resend.json["challenge"], "otp": code}).status_code, 200)
+            self.assertEqual(self.client.post("/api/auth/verify-otp", json={"challenge": resend.json["challenge"], "otp": code}).status_code, 400)
+
+    def test_order_contact_lookup_cannot_redirect_to_another_customer(self):
+        order = customer_fixtures.CustomerImprovementsTests.login_order_payload(self)
+        for account in (None, {"id": "999", "email": order["email"], "phone": "+919876543210"},
+                        {"id": "10", "email": "other@example.com", "phone": "+919876543210"}):
+            with self.subTest(account=account), \
+                    patch("app.auth.routes.shopify_client.find_order_for_login", return_value=order), \
+                    patch("app.auth.routes.shopify_client.find_customer_by_email", return_value=account), \
+                    patch("app.auth.routes.whatsapp_service.send_otp_whatsapp") as send:
+                options = self.client.post("/api/auth/delivery-options", json={"order_id": "100"})
+                self.assertEqual(options.json, {"channels": ["email"]})
+                result = self.client.post("/api/auth/request-otp", json={"order_id": "100", "channel": "whatsapp"})
+                self.assertEqual(result.status_code, 200)
+                send.assert_not_called()
+                self.assertEqual(OTPToken.query.count(), 0)
 
     def test_options_lookup_errors_and_invalid_input(self):
         for payload in ({}, {"email": "bad"}, {"order_id": []}, {"email": "customer@example.com", "order_id": "100"}):

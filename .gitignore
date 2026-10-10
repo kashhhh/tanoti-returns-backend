@@ -16,3 +16,4 @@ security-install-report.json
 !.env.local.example
 *.sql
 *.dump
+.deployed-revision

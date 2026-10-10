@@ -1,0 +1,107 @@
+name: Test and deploy backend
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Backend tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements.lock
+
+      - name: Install pinned dependencies
+        run: python -m pip install -r requirements.lock
+
+      - name: Run backend tests
+        run: python -W ignore::DeprecationWarning -m unittest discover -s tests -v
+
+  deploy:
+    name: Deploy to VPS
+    needs: test
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    concurrency:
+      group: tanoti-returns-backend-production
+      cancel-in-progress: false
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Package backend code
+        run: |
+          tar -czf "tanoti-backend-$GITHUB_SHA.tar.gz" \
+            --exclude='__pycache__' --exclude='*.pyc' \
+            app migrations deploy run.py requirements.lock requirements.txt
+
+      - name: Configure SSH
+        env:
+          VPS_HOST_KEY: ${{ secrets.VPS_HOST_KEY }}
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$VPS_HOST_KEY"
+          test -n "$VPS_SSH_KEY"
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/tanoti-backend-deploy
+          sed -i 's/\r$//' ~/.ssh/tanoti-backend-deploy
+          chmod 600 ~/.ssh/tanoti-backend-deploy
+          ssh-keygen -y -f ~/.ssh/tanoti-backend-deploy > /dev/null
+          printf '%s\n' "$VPS_HOST_KEY" > ~/.ssh/known_hosts
+          sed -i 's/\r$//' ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Upload backend code
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          set -euo pipefail
+          test -n "$VPS_HOST"
+          test -n "$VPS_USER"
+          scp -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            -o IdentitiesOnly=yes -o ConnectTimeout=15 -i ~/.ssh/tanoti-backend-deploy \
+            "tanoti-backend-$GITHUB_SHA.tar.gz" \
+            "$VPS_USER@$VPS_HOST:tanoti-backend-$GITHUB_SHA.tar.gz"
+
+      - name: Install, migrate and restart backend
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            -o IdentitiesOnly=yes -o ConnectTimeout=15 -i ~/.ssh/tanoti-backend-deploy \
+            "$VPS_USER@$VPS_HOST" "bash -s -- '$GITHUB_SHA'" < deploy/deploy-backend.sh
+
+      - name: Check public API
+        run: |
+          status=$(curl --silent --show-error --max-time 20 \
+            --output /dev/null --write-out '%{http_code}' \
+            https://returns.tanotiofficial.com/api/auth/session)
+          if [ "$status" != 401 ]; then
+            echo "Expected unauthenticated API status 401, received $status"
+            exit 1
+          fi
+
