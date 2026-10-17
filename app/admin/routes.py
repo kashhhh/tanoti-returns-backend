@@ -419,9 +419,11 @@ def mark_delivered(number):
         return jsonify({"error": "Only an approved exchange can be marked delivered"}), 400
     if req.delivered_at:
         return jsonify(_row(req, "exchange"))
-    if (req.outbound_status or "").lower() in ("returned", "cancelled", "canceled"):
+    if shipping_service.is_cancelled("replacement", req.outbound_status):
         return jsonify(error="A cancelled shipment cannot be marked delivered. Review it in Delhivery One."), 409
     booking = shipping_service.booking_details(number).get("replacement", {})
+    if booking and (booking.get("state") != "confirmed" or not req.outbound_tracking_id):
+        return jsonify(error="Restore or verify the replacement booking before marking delivery."), 409
     if booking.get("action_state") in ("pending", "submitted", "uncertain"):
         return jsonify(error="Confirm the pending carrier action through tracking before marking delivery."), 409
     # A manual shipment can be confirmed delivered even without an API waybill.
@@ -496,6 +498,7 @@ def confirm_shipment(kind, number):
 
 
 @admin_bp.post("/requests/<kind>/<number>/book-shipment")
+@admin_bp.post("/requests/<kind>/<number>/rebook-shipment")
 @admin_bp.post("/requests/<kind>/<number>/reconcile-shipment")
 @admin_required
 def recover_shipment(kind, number):
@@ -515,9 +518,17 @@ def recover_shipment(kind, number):
         return jsonify({"error": "No recoverable API attempt exists. Check earlier bookings in Delhivery One."}), 409
     prefix = "outbound" if outbound else "pickup"
     existing = getattr(req, prefix + "_tracking_id")
-    if existing:
+    rebook = request.path.endswith("/rebook-shipment")
+    if existing and not rebook:
         return jsonify(_row(req, kind))
     try:
+        if rebook:
+            if outbound:
+                variant = shopify_client.select_exchange_variant(req.order_item, req.requested_size)
+                if variant["id"] != req.requested_variant_id:
+                    return jsonify({"error": "Replacement variant changed. Review the request before booking."}), 409
+            shipping_service.prepare_rebooking(req, kind, leg, data.get("reference"))
+            booking = shipping_service.booking_details(number)[leg]
         if request.path.endswith("/reconcile-shipment"):
             carrier, waybill, status = shipping_service.reconcile(number, leg, data.get("waybill", ""))
         elif booking["state"] not in ("not_attempted", "confirmed"):
@@ -533,17 +544,18 @@ def recover_shipment(kind, number):
                 item=req.order_item, request_number=number, pickup_address=req.pickup_address)
     except ValueError as exc:
         db.session.rollback()
-        return jsonify({"error": str(exc)}), 409 if isinstance(exc, shipping_service.BookingUncertain) else 400
+        return jsonify({"error": str(exc), "request": _row(req, kind)}), 409 if isinstance(exc, shipping_service.BookingUncertain) else 400
     except Exception:
         db.session.rollback()
-        return jsonify({"error": "Could not verify or book the shipment. Refresh the request before proceeding."}), 503
+        return jsonify({"error": "Could not verify or book the shipment. Refresh the request before proceeding.", "request": _row(req, kind)}), 503
     req = _find_request(kind, number)
     setattr(req, prefix + "_carrier", carrier)
     setattr(req, prefix + "_tracking_id", waybill)
     setattr(req, prefix + "_status", status)
-    queue_update(req, kind, "replacement_booked" if outbound else "pickup_booked")
+    event = ("replacement_cancelled" if outbound else "pickup_cancelled") if shipping_service.is_cancelled(leg, status) else ("replacement_booked" if outbound else "pickup_booked")
+    queue_update(req, kind, event)
     db.session.commit()
-    deliver_pending(limit=1)
+    deliver_pending(request_number=number)
     return jsonify(_row(req, kind))
 
 
@@ -558,7 +570,7 @@ def refresh_tracking(kind, number):
     except Exception:
         db.session.rollback()
         from app.models import ShippingBooking
-        ShippingBooking.query.filter_by(request_number=number).update({"tracking_error": "Could not refresh Delhivery tracking. Please try again."})
+        ShippingBooking.query.filter_by(request_number=number).filter(ShippingBooking.state != "superseded").update({"tracking_error": "Could not refresh Delhivery tracking. Please try again."})
         db.session.commit()
         return jsonify({"error": "Delhivery tracking is unavailable. Existing shipment details have been kept."}), 503
     db.session.commit()
@@ -574,6 +586,11 @@ def cancel_shipment(kind, number):
         return jsonify(error="Request not found"), 404
     try:
         shipping_service.cancel_shipment(req, kind, (request.get_json(silent=True) or {}).get("leg"))
+        leg = (request.get_json(silent=True) or {}).get("leg")
+        if shipping_service.is_cancelled(leg, getattr(req, ("pickup" if leg == "pickup" else "outbound") + "_status")):
+            queue_update(req, kind, "pickup_cancelled" if leg == "pickup" else "replacement_cancelled")
+        db.session.commit()
+        deliver_pending(limit=1)
         return jsonify(_row(req, kind))
     except ValueError as exc:
         db.session.rollback()

@@ -40,7 +40,7 @@ def build_timeline(obj, kind: str):
         "tracking_url": shipping_service.tracking_url(obj.pickup_carrier, obj.pickup_tracking_id),
     })
 
-    if (obj.pickup_status or "").lower() in ("cancelled", "canceled") and obj.parcel_received_at is None:
+    if (obj.pickup_status or "").lower() in ("cancelled", "canceled", "closed") and obj.parcel_received_at is None:
         steps.append({"label": "Pickup cancelled", "date": None, "done": True,
                       "note": "Your request remains open. Our team will contact you about the next step."})
         return steps
@@ -72,7 +72,7 @@ def build_timeline(obj, kind: str):
             "done": obj.status == "completed",
         })
     else:
-        if (obj.outbound_status or "").lower() in ("returned", "cancelled", "canceled") and not obj.delivered_at:
+        if (obj.outbound_status or "").lower() in ("returned", "cancelled", "canceled", "closed") and not obj.delivered_at:
             steps.append({"label": "Replacement shipment cancelled or returned", "date": None, "done": True,
                           "note": "Your exchange remains open. Our team will contact you about the next step."})
             return steps

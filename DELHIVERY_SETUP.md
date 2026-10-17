@@ -41,8 +41,11 @@ cd /var/www/tanoti-returns/backend
 sudo systemctl restart tanoti
 ```
 
-The new migration is `f63d029c471a`; it adds a booking ledger. Apply it before serving
-this version. This work has not changed the VPS environment or deployed the migration.
+The latest migration is `i30e94f6c123`; it preserves separate attempts for rebooked
+shipments and upgrades existing bookings to attempt 1. Apply all migrations before
+serving this version. Deploy the backend and rebuilt frontend together. This work
+has not changed the VPS environment or deployed the migration. Downgrading is blocked
+once rebooking history exists, to prevent losing shipment records.
 
 ## Tracking and labels
 
@@ -70,6 +73,39 @@ Print replacement labels in Delhivery One using the saved forward waybill; the a
 view links there. The portal does not generate its own carrier labels.
 
 ## Failure recovery
+
+### Cancel and rebook (admin team only)
+
+1. Open the request and select **Refresh Delhivery tracking**.
+2. For a parcel awaiting collection, choose **Cancel pickup shipment** (or the
+   replacement cancellation button). The return/exchange remains open. An accepted
+   cancellation request is not yet confirmed cancellation; refresh tracking until
+   Delhivery confirms it. A timeout cannot cause a second cancellation submission.
+3. When Delhivery reports a cancelled/closed reverse pickup, **Rebook pickup** is
+   available. Returned/cancelled replacement shipments also offer rebooking.
+   Rebooking checks live tracking again and checks replacement availability.
+4. A successful rebooking gets a fresh reference (`-R-2`, `-R-3`, or `-F-2`, etc.),
+   waybill, and customer email. **Previous bookings** retains older references,
+   waybills, statuses, and action histories in the ledger. Old attempts no longer
+   cause unresolved cancellation alerts.
+5. If rebooking fails, reopen/refresh the request. **Retry Delhivery booking** is
+   available for configuration/credential failures; an uncertain result offers
+   **Verify Delhivery waybill**. Use the new attempt's reference, not the old one.
+   Even a cancelled waybill can be verified so staff can recover and then rebook it.
+
+The app distinguishes a driver dispatched for collection (`PP`) from a parcel
+already picked up (`PU`). Parcels already moving require intervention in Delhivery
+One/account support. Missed collection alone does not permit creating another
+active shipment: cancel and obtain carrier confirmation first. No chosen-date
+rescheduling API is introduced. Manually recorded shipments without an API booking
+ledger still require carrier-side handling; the app does not invent their identity.
+
+Customers receive cancellation and rebooking updates but cannot cancel or rebook
+themselves. Unsent confirmations for cancelled bookings are removed. Delivery
+tracking follows the current replacement booking and skips an already received
+reverse parcel, so old reverse tracking cannot block replacement delivery updates.
+
+### Other booking failures
 
 - Missing configuration or invalid addresses are detected before creating a shipment.
   Fix the problem, then use **Retry Delhivery booking** in the request detail view.
@@ -99,4 +135,6 @@ After configuring a staging account, validate the account-specific payload in
 Delhivery's API test environment before enabling real approval-triggered bookings.
 
 Provider references: [manifestation](https://delhivery-express-api-doc.readme.io/reference/order-creation-api),
-[pickup and tracking FAQ](https://one.delhivery.com/developer-portal/document/b2c/detail/faq).
+[pickup and tracking FAQ](https://one.delhivery.com/developer-portal/document/b2c/detail/faq),
+[cancellation](https://delhivery-express-api-doc.readme.io/reference/cancel-order-api),
+[reverse pickup statuses](https://delhivery-express-api-doc.readme.io/reference/reverse-pickups).

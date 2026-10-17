@@ -2,7 +2,7 @@
 def stage_for(obj, kind):
     status = obj.status.value
     if status == "pickup_scheduled":
-        if (obj.pickup_status or "").lower() in ("cancelled", "canceled"):
+        if (obj.pickup_status or "").lower() in ("cancelled", "canceled", "closed"):
             return "pickup_cancelled"
         return "awaiting_parcel" if obj.pickup_tracking_id else "pickup_pending"
     if status == "completed":
@@ -14,7 +14,7 @@ def stage_for(obj, kind):
             return "gift_card_issued" if obj.gift_card_code else "refund_approved"
         if obj.delivered_at:
             return "delivered"
-        if (obj.outbound_status or "").lower() in ("returned", "cancelled", "canceled"):
+        if (obj.outbound_status or "").lower() in ("returned", "cancelled", "canceled", "closed"):
             return "replacement_cancelled"
         return "shipment_booked" if obj.outbound_tracking_id else "replacement_pending"
     return status

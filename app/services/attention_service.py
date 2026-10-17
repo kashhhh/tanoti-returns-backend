@@ -9,7 +9,7 @@ def rules(model, kind, now=None):
     now = now or datetime.utcnow()
     number = model.return_number if kind == "return" else model.exchange_number
     booking = lambda condition: exists(select(ShippingBooking.reference).where(
-        ShippingBooking.request_number == number, condition)).correlate(model)
+        ShippingBooking.request_number == number, ShippingBooking.state != "superseded", condition)).correlate(model)
     terminal = (and_(model.status == RequestStatus.COMPLETED,
                      or_(model.gift_card_code.isnot(None), model.refund_paid_at.isnot(None), model.net_refund_amount == 0))
                 if kind == "return" else model.delivered_at.isnot(None))
@@ -25,7 +25,7 @@ def rules(model, kind, now=None):
             func.coalesce(model.pickup_tracking_id, "") == "")),
         ("Shipment booking needs review", and_(active, booking(ShippingBooking.state.in_(["not_attempted", "pending", "uncertain"])))),
         ("Shipment action needs confirmation", and_(active, booking(ShippingBooking.action_state.in_(["pending", "submitted", "uncertain", "rejected"])))),
-        ("Shipment cancelled or returned — arrange next step", and_(active, booking(func.lower(ShippingBooking.carrier_status).in_(["canceled", "cancelled", "returned"])))),
+        ("Shipment cancelled or returned — arrange next step", and_(active, booking(func.lower(ShippingBooking.carrier_status).in_(["canceled", "cancelled", "closed", "returned"])))),
         ("Tracking update failed", and_(active, booking(ShippingBooking.tracking_error.isnot(None)))),
         ("Email delivery needs attention", exists(select(Notification.id).where(
             Notification.event_key.like(number + ":%"), Notification.sent_at.is_(None),

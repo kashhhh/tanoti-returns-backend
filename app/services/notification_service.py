@@ -8,7 +8,7 @@ from app.models import Notification
 from app.services.shipping_service import tracking_url
 from app.services.email_templates import layout
 
-EMAIL_EVENTS = {"received", "pickup_booked", "replacement_booked", "delivered", "gift_card", "refund_paid"}
+EMAIL_EVENTS = {"received", "pickup_booked", "replacement_booked", "pickup_cancelled", "replacement_cancelled", "delivered", "gift_card", "refund_paid"}
 
 
 def queue_update(obj, kind, event):
@@ -16,6 +16,14 @@ def queue_update(obj, kind, event):
         obj.shopify_sync_status = "pending"
     number = obj.return_number if kind == "return" else obj.exchange_number
     key = f"{number}:{event}"
+    if event in {"pickup_booked", "replacement_booked", "pickup_cancelled", "replacement_cancelled"}:
+        from app.services.shipping_service import current_booking
+        booking = current_booking(number, "pickup" if event.startswith("pickup_") else "replacement")
+        if booking and booking.attempt > 1:
+            key = f"{number}:attempt{booking.attempt}:{event}"
+        if event.endswith("_cancelled"):
+            # Do not send a queued booking confirmation after its cancellation.
+            Notification.query.filter_by(event_key=key.replace("_cancelled", "_booked"), sent_at=None).delete()
     if Notification.query.filter_by(event_key=key).first():
         return
     from app.utils.audit import record_admin_action
@@ -23,6 +31,8 @@ def queue_update(obj, kind, event):
     if event not in EMAIL_EVENTS:
         return
     text = {
+        "pickup_cancelled": ("Your pickup needs to be rearranged", "The carrier has cancelled your pickup. Your return or exchange request remains open. Our team will arrange the next step; you do not need to submit a new request."),
+        "replacement_cancelled": ("Your replacement shipment needs attention", "The carrier has cancelled or returned your replacement shipment. Your exchange remains open and our team will arrange the next step."),
         "refund_paid": ("Your refund has been issued", "Our team has issued your refund. The time it takes to appear in your account depends on your bank or payment provider."),
         "delivered": ("Your replacement has arrived", "Your replacement has been confirmed delivered and your exchange is complete. We hope it is just right for you."),
         "received": ("We have received your request", "Thank you for sending your request. Our team will review the details and photos. You can check its progress in the returns portal."),

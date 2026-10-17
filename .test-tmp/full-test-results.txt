@@ -1,0 +1,27 @@
+...........................................................INFO  [alembic.runtime.migration] Context impl SQLiteImpl.
+INFO  [alembic.runtime.migration] Will assume non-transactional DDL.
+INFO  [alembic.runtime.migration] Running upgrade  -> b9011b35fb39, empty message
+INFO  [alembic.runtime.migration] Running upgrade b9011b35fb39 -> 066cf68194cc, initial schema
+INFO  [alembic.runtime.migration] Context impl SQLiteImpl.
+INFO  [alembic.runtime.migration] Will assume non-transactional DDL.
+INFO  [alembic.runtime.migration] Running upgrade 066cf68194cc -> 93c7e02a1b44, Admin OTP, request addresses, exchange photos and email queue.
+INFO  [alembic.runtime.migration] Running upgrade 93c7e02a1b44 -> a128e47f01cd, Record actual manual refund payment and exchange delivery.
+INFO  [alembic.runtime.migration] Running upgrade a128e47f01cd -> d291c04fa832, Optional customer feedback on return and exchange requests.
+INFO  [alembic.runtime.migration] Running upgrade d291c04fa832 -> f482b17a61e0, Individual purchased units, replacement lineage and Shopify sync tracking.
+Revision ID: f482b17a61e0
+Revises: d291c04fa832
+INFO  [alembic.runtime.migration] Running upgrade f482b17a61e0 -> 78ad903bc612, Shared security counters.
+INFO  [alembic.runtime.migration] Running upgrade 78ad903bc612 -> c94a8e2fd061, Revocable sessions, webhook receipts and durable gift-card attempts.
+INFO  [alembic.runtime.migration] Running upgrade c94a8e2fd061 -> e51a93bc820d, Opaque login challenges keep order email addresses private.
+INFO  [alembic.runtime.migration] Running upgrade e51a93bc820d -> f63d029c471a, Durable Delhivery shipment attempts.
+INFO  [alembic.runtime.migration] Running upgrade f63d029c471a -> a74e13b95c02, Refund valuation evidence and durable carrier action history.
+INFO  [alembic.runtime.migration] Running upgrade a74e13b95c02 -> g18c72d4a901, Start five-day return windows at confirmed delivery.
+INFO  [alembic.runtime.migration] Running upgrade g18c72d4a901 -> h29d83e5b012, Track store-wide order imports and delivery freshness.
+INFO  [alembic.runtime.migration] Context impl SQLiteImpl.
+INFO  [alembic.runtime.migration] Will assume non-transactional DDL.
+INFO  [alembic.runtime.migration] Running upgrade h29d83e5b012 -> i30e94f6c123, Preserve each Delhivery booking when a cancelled shipment is rebooked.
+.......................................................................................................................................
+----------------------------------------------------------------------
+Ran 194 tests in 25.822s
+
+OK

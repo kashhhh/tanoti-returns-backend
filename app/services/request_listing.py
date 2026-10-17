@@ -16,12 +16,12 @@ def branch(model, kind):
     completed = (case((model.net_refund_amount == 0, "no_refund_due"), (model.refund_paid_at.isnot(None), "refund_paid"), (func.coalesce(model.gift_card_code, "") != "", "gift_card_issued"), else_="refund_approved")
                  if kind == "return" else
                  case((model.delivered_at.isnot(None), "delivered"),
-                      (func.lower(model.outbound_status).in_(["returned", "cancelled", "canceled"]), "replacement_cancelled"),
+                      (func.lower(model.outbound_status).in_(["returned", "cancelled", "canceled", "closed"]), "replacement_cancelled"),
                       (func.coalesce(model.outbound_tracking_id, "") != "", "shipment_booked"), else_="replacement_pending"))
     stage = case(
         (model.status == RequestStatus.PENDING, "pending"),
         (model.status == RequestStatus.PICKUP_SCHEDULED,
-         case((func.lower(model.pickup_status).in_(["cancelled", "canceled"]), "pickup_cancelled"),
+         case((func.lower(model.pickup_status).in_(["cancelled", "canceled", "closed"]), "pickup_cancelled"),
               (func.coalesce(model.pickup_tracking_id, "") != "", "awaiting_parcel"), else_="pickup_pending")),
         (model.status == RequestStatus.PARCEL_RECEIVED, "parcel_received"),
         (model.status == RequestStatus.REJECTED, "rejected"),

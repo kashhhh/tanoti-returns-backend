@@ -301,6 +301,7 @@ class ShippingBooking(db.Model):
     reference = db.Column(db.String(48), primary_key=True)
     request_number = db.Column(db.String(20), nullable=False, index=True)
     leg = db.Column(db.String(16), nullable=False)
+    attempt = db.Column(db.Integer, nullable=False, default=1, server_default="1")
     environment = db.Column(db.String(16), nullable=False)
     warehouse = db.Column(db.String(255), nullable=False)
     state = db.Column(db.String(16), nullable=False)
@@ -317,7 +318,7 @@ class ShippingBooking(db.Model):
     action_history = db.Column(db.JSON, nullable=True)
     created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
-    __table_args__ = (db.UniqueConstraint("request_number", "leg", name="uq_shipping_request_leg"),)
+    __table_args__ = (db.UniqueConstraint("request_number", "leg", "attempt", name="uq_shipping_request_leg_attempt"),)
 
 
 class AdminSettings(db.Model):
