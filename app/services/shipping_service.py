@@ -38,6 +38,29 @@ class BookingRejected(ValueError):
     pass
 
 
+class TrackingError(ValueError):
+    """A safe, actionable tracking diagnostic, without carrier response bodies."""
+
+
+def tracking_error_message(exc):
+    if isinstance(exc, TrackingError):
+        return str(exc)
+    if isinstance(exc, (requests.Timeout, TimeoutError)):
+        return "Delhivery tracking timed out. Retry shortly; the existing booking is unchanged."
+    if isinstance(exc, requests.HTTPError):
+        status = exc.response.status_code if exc.response is not None else None
+        if status in (401, 403):
+            return "Delhivery rejected tracking access. Check the API token and its production/staging environment."
+        if status == 429:
+            return "Delhivery's tracking rate limit was reached. Wait a few minutes before refreshing."
+        if status and status >= 500:
+            return "Delhivery's tracking service is temporarily unavailable. Retry shortly."
+        return "Delhivery rejected the tracking request. Verify this waybill in Delhivery One."
+    if isinstance(exc, requests.ConnectionError):
+        return "The server could not connect to Delhivery tracking. Check server connectivity and retry."
+    return "Tracking could not be processed. Contact support with this request reference; the existing booking is unchanged."
+
+
 def _base_url():
     environment = current_app.config.get("DELHIVERY_ENVIRONMENT")
     if environment not in HOSTS:
@@ -179,14 +202,25 @@ def _schedule(order, item, number, leg, address, size=None):
 
 def fetch_tracking(waybill):
     if not re.fullmatch(r"[0-9]{8,32}", str(waybill)):
-        raise ValueError("Enter a valid Delhivery waybill")
-    response = requests.get(_base_url() + "/api/v1/packages/json/", headers=_headers(),
+        raise TrackingError("Enter a valid Delhivery waybill")
+    try:
+        base, headers = _base_url(), _headers()
+    except ValueError as exc:
+        raise TrackingError(str(exc)) from exc
+    response = requests.get(base + "/api/v1/packages/json/", headers=headers,
                             params={"waybill": str(waybill)}, timeout=15)
     response.raise_for_status()
-    shipments = [entry.get("Shipment", {}) for entry in response.json().get("ShipmentData", [])]
+    try:
+        result = response.json()
+    except ValueError as exc:
+        raise TrackingError("Delhivery returned an unreadable tracking response. Retry shortly.") from exc
+    if not isinstance(result, dict) or not isinstance(result.get("ShipmentData"), list):
+        raise TrackingError("Delhivery returned an unexpected tracking response. Verify the waybill in Delhivery One.")
+    shipments = [entry["Shipment"] for entry in result["ShipmentData"]
+                 if isinstance(entry, dict) and isinstance(entry.get("Shipment"), dict)]
     matches = [s for s in shipments if str(s.get("AWB")) == str(waybill)]
     if len(matches) != 1:
-        raise ValueError("Delhivery did not return this waybill")
+        raise TrackingError("Delhivery did not return this waybill. Check the waybill and booking environment in Delhivery One.")
     return matches[0]
 
 
@@ -374,6 +408,7 @@ def refresh_tracking(req, kind):
     from app.services.notification_service import queue_update
     from app.services.replacement_service import ensure_replacement
     number = req.return_number if kind == "return" else req.exchange_number
+    errors = []
     for leg, prefix in (("pickup", "pickup"), ("replacement", "outbound")):
         if leg == "replacement" and kind != "exchange":
             continue
@@ -383,33 +418,47 @@ def refresh_tracking(req, kind):
         if not waybill or getattr(req, prefix + "_carrier") != "delhivery":
             continue
         booking = current_booking(number, leg)
-        if not booking or booking.state != "confirmed" or booking.environment != current_app.config["DELHIVERY_ENVIRONMENT"]:
-            continue
-        if booking.waybill != waybill:
-            raise ValueError("Tracking waybill does not match the current booking")
-        shipment = fetch_tracking(waybill)
-        if str(shipment.get("ReferenceNo")) != booking.reference:
-            raise ValueError("Tracking reference does not match this request")
-        status = shipment.get("Status") or {}
-        label = str(status.get("Status") or "")
-        if label:
-            setattr(req, prefix + "_status", label[:32])
-        record_tracking(booking, shipment)
-        if is_cancelled(leg, label):
-            queue_update(req, kind, "pickup_cancelled" if leg == "pickup" else "replacement_cancelled")
-        if (leg == "replacement" and label.lower() == "delivered" and status.get("StatusType") == "DL"
-                and req.status == RequestStatus.COMPLETED and not req.delivered_at):
-            # Carrier timestamps without an offset are India local time.
-            date = datetime.fromisoformat(str(status.get("StatusDateTime", "")).replace("Z", "+00:00"))
-            from datetime import timedelta, timezone
-            date = date.replace(tzinfo=timezone(timedelta(hours=5, minutes=30))) if not date.tzinfo else date
-            date = date.astimezone(timezone.utc).replace(tzinfo=None)
-            if date < req.created_at or date > datetime.utcnow() + timedelta(minutes=5):
-                raise ValueError("Invalid carrier delivery time")
-            req.delivered_at = req.completed_at = date
-            req.delivered_by = "Delhivery tracking"
-            ensure_replacement(req)
-            queue_update(req, kind, "delivered")
+        if not booking:
+            continue  # Manually recorded shipments have no API identity to verify.
+        try:
+            with db.session.begin_nested():
+                if booking.state != "confirmed":
+                    raise TrackingError("This booking is not verified. Use Verify Delhivery waybill before refreshing tracking.")
+                if booking.environment != current_app.config.get("DELHIVERY_ENVIRONMENT"):
+                    raise TrackingError("This booking belongs to a different Delhivery environment. Restore its original environment before tracking.")
+                if booking.waybill != waybill:
+                    raise TrackingError("Tracking waybill does not match the current booking. Verify the saved booking before continuing.")
+                shipment = fetch_tracking(waybill)
+                if str(shipment.get("ReferenceNo")) != booking.reference:
+                    raise TrackingError("Delhivery returned a different order reference for this waybill. Verify the saved booking in Delhivery One.")
+                status = shipment.get("Status") or {}
+                label = str(status.get("Status") or "").strip()
+                if not label:
+                    raise TrackingError("Delhivery returned no shipment status. Retry tracking shortly.")
+                if label:
+                    setattr(req, prefix + "_status", label[:32])
+                record_tracking(booking, shipment)
+                if is_cancelled(leg, label):
+                    queue_update(req, kind, "pickup_cancelled" if leg == "pickup" else "replacement_cancelled")
+                if (leg == "replacement" and label.lower() == "delivered" and status.get("StatusType") == "DL"
+                        and req.status == RequestStatus.COMPLETED and not req.delivered_at):
+                    # Carrier timestamps without an offset are India local time.
+                    date = _carrier_date(status.get("StatusDateTime"))
+                    if date is None:
+                        raise TrackingError("Delhivery reported delivery without a valid date. Verify delivery before marking it received.")
+                    from datetime import timedelta, timezone
+                    if date < req.created_at or date > datetime.utcnow() + timedelta(minutes=5):
+                        raise TrackingError("Delhivery reported an invalid delivery date. Verify delivery before marking it received.")
+                    req.delivered_at = req.completed_at = date
+                    req.delivered_by = "Delhivery tracking"
+                    ensure_replacement(req)
+                    queue_update(req, kind, "delivered")
+        except Exception as exc:
+            message = tracking_error_message(exc)
+            booking.tracking_error = message
+            errors.append(f"{leg}: {message}")
+            current_app.logger.warning("Delhivery tracking failed for %s (%s): %s", booking.reference, type(exc).__name__, message)
+    return errors
 
 
 def sync_tracking(limit=100):

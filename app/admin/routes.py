@@ -519,7 +519,10 @@ def recover_shipment(kind, number):
     prefix = "outbound" if outbound else "pickup"
     existing = getattr(req, prefix + "_tracking_id")
     rebook = request.path.endswith("/rebook-shipment")
-    if existing and not rebook:
+    reconciling = request.path.endswith("/reconcile-shipment")
+    if existing and reconciling and data.get("waybill", "") != existing:
+        return jsonify(error="Verify the tracking number already recorded on this request."), 409
+    if existing and not rebook and not reconciling:
         return jsonify(_row(req, kind))
     try:
         if rebook:
@@ -566,7 +569,7 @@ def refresh_tracking(kind, number):
     if not req:
         return jsonify({"error": "Not found"}), 404
     try:
-        shipping_service.refresh_tracking(req, kind)
+        errors = shipping_service.refresh_tracking(req, kind)
     except Exception:
         db.session.rollback()
         from app.models import ShippingBooking
@@ -575,6 +578,8 @@ def refresh_tracking(kind, number):
         return jsonify({"error": "Delhivery tracking is unavailable. Existing shipment details have been kept."}), 503
     db.session.commit()
     deliver_pending(limit=1)
+    if errors:
+        return jsonify(error=" ".join(errors), request=_row(req, kind)), 503
     return jsonify(_row(req, kind))
 
 

@@ -1,4 +1,11 @@
-...........................................................INFO  [alembic.runtime.migration] Context impl SQLiteImpl.
+.........................[2026-10-17 19:29:11,212] WARNING in shipping_service: Delhivery tracking failed for RET-80EBCE4CF5EC4551-R (TrackingError): Delhivery returned a different order reference for this waybill. Verify the saved booking in Delhivery One.
+................[2026-10-17 19:29:16,609] WARNING in shipping_service: Delhivery tracking failed for RET-634AAA55A25D4C4B-R (TrackingError): This booking belongs to a different Delhivery environment. Restore its original environment before tracking.
+.[2026-10-17 19:29:16,766] WARNING in shipping_service: Delhivery tracking failed for RET-3D549296609A4C24-R (HTTPError): Delhivery rejected tracking access. Check the API token and its production/staging environment.
+[2026-10-17 19:29:16,775] WARNING in shipping_service: Delhivery tracking failed for RET-3D549296609A4C24-R (HTTPError): Delhivery rejected tracking access. Check the API token and its production/staging environment.
+[2026-10-17 19:29:16,787] WARNING in shipping_service: Delhivery tracking failed for RET-3D549296609A4C24-R (HTTPError): Delhivery's tracking rate limit was reached. Wait a few minutes before refreshing.
+[2026-10-17 19:29:16,798] WARNING in shipping_service: Delhivery tracking failed for RET-3D549296609A4C24-R (HTTPError): Delhivery's tracking service is temporarily unavailable. Retry shortly.
+.[2026-10-17 19:29:17,025] WARNING in shipping_service: Delhivery tracking failed for EXC-9FE0CFAF65F14C4D-R (TimeoutError): Delhivery tracking timed out. Retry shortly; the existing booking is unchanged.
+.....................INFO  [alembic.runtime.migration] Context impl SQLiteImpl.
 INFO  [alembic.runtime.migration] Will assume non-transactional DDL.
 INFO  [alembic.runtime.migration] Running upgrade  -> b9011b35fb39, empty message
 INFO  [alembic.runtime.migration] Running upgrade b9011b35fb39 -> 066cf68194cc, initial schema
@@ -22,6 +29,6 @@ INFO  [alembic.runtime.migration] Will assume non-transactional DDL.
 INFO  [alembic.runtime.migration] Running upgrade h29d83e5b012 -> i30e94f6c123, Preserve each Delhivery booking when a cancelled shipment is rebooked.
 .......................................................................................................................................
 ----------------------------------------------------------------------
-Ran 194 tests in 25.822s
+Ran 199 tests in 39.740s
 
 OK

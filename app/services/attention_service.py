@@ -8,8 +8,11 @@ from app.models import ShippingBooking, Notification, GiftCardIssuance, RequestS
 def rules(model, kind, now=None):
     now = now or datetime.utcnow()
     number = model.return_number if kind == "return" else model.exchange_number
+    relevant_leg = and_(ShippingBooking.leg == "pickup", model.parcel_received_at.is_(None))
+    if kind == "exchange":
+        relevant_leg = or_(relevant_leg, and_(ShippingBooking.leg == "replacement", model.delivered_at.is_(None)))
     booking = lambda condition: exists(select(ShippingBooking.reference).where(
-        ShippingBooking.request_number == number, ShippingBooking.state != "superseded", condition)).correlate(model)
+        ShippingBooking.request_number == number, ShippingBooking.state != "superseded", relevant_leg, condition)).correlate(model)
     terminal = (and_(model.status == RequestStatus.COMPLETED,
                      or_(model.gift_card_code.isnot(None), model.refund_paid_at.isnot(None), model.net_refund_amount == 0))
                 if kind == "return" else model.delivered_at.isnot(None))

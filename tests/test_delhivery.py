@@ -386,3 +386,79 @@ class DelhiveryTests(unittest.TestCase):
         result = self.action(number, "mark-delivered", kind="exchange")
         self.assertEqual(result.status_code, 409, result.json)
         self.assertIsNone(ExchangeRequest.query.one().delivered_at)
+
+    def test_tracking_errors_explain_http_failure_and_preserve_last_status(self):
+        number = self.booked_pickup()
+        booking = shipping.current_booking(number, "pickup")
+        booking.carrier_status = "Dispatched"
+        booking.tracking_checked_at = datetime.utcnow()
+        db.session.commit()
+        for code, message in [(401, "token"), (403, "token"), (429, "rate limit"), (503, "temporarily unavailable")]:
+            with self.subTest(code=code):
+                failure = shipping.requests.HTTPError("SECRET response content", response=Mock(status_code=code))
+                with patch.object(shipping, "fetch_tracking", side_effect=failure):
+                    result = self.action(number, "refresh-tracking")
+                self.assertEqual(result.status_code, 503)
+                self.assertIn(message, result.json["error"])
+                self.assertNotIn("SECRET", str(result.json))
+                self.assertEqual(result.json["request"]["shipping_bookings"]["pickup"]["carrier_status"], "Dispatched")
+        with patch.object(shipping, "fetch_tracking", return_value=self.tracking(number + "-R", "Dispatched", StatusType="PP")):
+            result = self.action(number, "refresh-tracking")
+        self.assertEqual(result.status_code, 200)
+        self.assertIsNone(result.json["shipping_bookings"]["pickup"]["tracking_error"])
+
+    def test_existing_tracking_can_verify_uncertain_booking(self):
+        number = self.booked_pickup()
+        booking = shipping.current_booking(number, "pickup")
+        booking.state, booking.error = "uncertain", "Old ambiguous booking"
+        db.session.commit()
+        with patch.object(shipping, "fetch_tracking", return_value=self.tracking(number + "-R", "Scheduled")) as fetch:
+            result = self.action(number, "reconcile-shipment", leg="pickup", waybill="1234567890123")
+        self.assertEqual(result.status_code, 200)
+        fetch.assert_called_once()
+        self.assertEqual(result.json["shipping_bookings"]["pickup"]["state"], "confirmed")
+        self.assertNotIn("Shipment booking needs review", result.json["attention_reasons"])
+
+    def test_tracking_failure_on_one_leg_preserves_other_leg_success(self):
+        number = self.submit("exchange").json["exchange_number"]
+        with patch.object(shipping.requests, "post", side_effect=[self.response(number, "pickup"), self.response(number, "replacement", "2234567890123")]):
+            self.action(number, "accept-photos", kind="exchange")
+            self.action(number, "mark-parcel-received", kind="exchange")
+            self.action(number, "accept-parcel", kind="exchange")
+        req = ExchangeRequest.query.one()
+        req.parcel_received_at = None  # A legacy record with both legs requiring refresh.
+        db.session.commit()
+        with patch.object(shipping, "fetch_tracking", side_effect=[TimeoutError(), self.tracking(number + "-F", "Not Picked", StatusType="UD")]):
+            result = self.action(number, "refresh-tracking", kind="exchange")
+        self.assertEqual(result.status_code, 503)
+        bookings = result.json["request"]["shipping_bookings"]
+        self.assertIn("timed out", bookings["pickup"]["tracking_error"])
+        self.assertIsNone(bookings["replacement"]["tracking_error"])
+        self.assertEqual(bookings["replacement"]["carrier_status"], "Not Picked")
+        self.assertFalse(bookings["replacement"]["can_rebook"])
+        req.parcel_received_at = datetime.utcnow()
+        db.session.commit()
+        with patch.object(shipping, "fetch_tracking", return_value=self.tracking(number + "-F", "Not Picked", StatusType="UD")):
+            result = self.action(number, "refresh-tracking", kind="exchange")
+        self.assertNotIn("Tracking update failed", result.json["attention_reasons"])
+
+    def test_malformed_tracking_and_reference_mismatch_have_safe_diagnostics(self):
+        response = Mock()
+        response.json.return_value = {"ShipmentData": "bad"}
+        with patch.object(shipping.requests, "get", return_value=response):
+            with self.assertRaisesRegex(shipping.TrackingError, "unexpected tracking response"):
+                shipping.fetch_tracking("1234567890123")
+        number = self.booked_pickup()
+        with patch.object(shipping, "fetch_tracking", return_value=self.tracking("WRONG")):
+            result = self.action(number, "refresh-tracking")
+        self.assertEqual(result.status_code, 503)
+        self.assertIn("different order reference", result.json["error"])
+
+    def test_tracking_environment_mismatch_is_not_silently_skipped(self):
+        number = self.booked_pickup()
+        self.app.config["DELHIVERY_ENVIRONMENT"] = "production"
+        with patch.object(shipping, "fetch_tracking") as fetch:
+            result = self.action(number, "refresh-tracking")
+            fetch.assert_not_called()
+        self.assertEqual(result.status_code, 503)
+        self.assertIn("different Delhivery environment", result.json["error"])

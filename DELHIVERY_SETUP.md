@@ -107,6 +107,24 @@ reverse parcel, so old reverse tracking cannot block replacement delivery update
 
 ### Other booking failures
 
+- Tracking failures now identify credential/environment issues, rate limits,
+  timeouts, missing waybills, reference mismatches, and invalid responses without
+  exposing tokens or carrier response bodies. The detail view labels the saved
+  timestamp **Last successful check**; a failed refresh retains the last known
+  status and timestamp. Pickup and replacement refresh independently, and failures
+  on a received pickup no longer trigger attention alerts for an active replacement.
+- **Not Picked** means a forward parcel has not been collected from the warehouse;
+  it is not cancellation confirmation. Check collection in Delhivery One. A reverse
+  **Dispatched** scan needs its status type to distinguish out-for-collection from
+  movement after collection. Neither label alone permits rebooking.
+- An existing request with a recorded tracking number but an uncertain booking can
+  now use **Verify Delhivery waybill** to reconcile that same number. A different
+  number cannot replace it through reconciliation.
+- After uploading these diagnostic changes and restarting the backend, refresh the
+  affected request. If it still fails, use the specific message now shown. The
+  scheduled sync also logs a safe diagnostic with the booking reference and error
+  class. No additional database migration is needed for this diagnostic update.
+
 - Missing configuration or invalid addresses are detected before creating a shipment.
   Fix the problem, then use **Retry Delhivery booking** in the request detail view.
 - A confirmed shipment is saved before finalizing the request. **Restore confirmed
