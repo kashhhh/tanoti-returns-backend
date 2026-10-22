@@ -79,4 +79,17 @@ and sessions. Existing credentials retain their previous behavior. Downgrading
 deletes restricted credentials before dropping scope fields to prevent widening
 their access. Rebuild and deploy the frontend with the updated sign-in guidance.
 
+If only email is offered through both methods, run from the deployed backend:
+
+```
+.venv/bin/python -m flask --app run:app diagnose-customer-login --email CUSTOMER_EMAIL
+```
+
+This checks the deployed configuration, scope migration, Shopify customer phone
+sources, order identity matches, and locally cached item eligibility. It sends no
+OTP and changes no records. Cached eligibility is labeled explicitly because the
+normal order-login lookup refreshes the order from Shopify before deciding.
+Output omits contact values, tokens, and provider error bodies. An unknown command
+means the deployed backend does not yet include these diagnostics.
+
 Template format: [Meta authentication template example](https://www.postman.com/meta/whatsapp-business-platform/request/6vkv46u/create-authentication-template-w-otp-copy-code-button).

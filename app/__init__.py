@@ -1,3 +1,4 @@
+import click
 from flask import Flask, send_from_directory, abort, jsonify, request
 from flask_cors import CORS
 
@@ -56,6 +57,13 @@ def create_app(config_class=Config):
         if not record or "/uploads/" + filename not in (record.photo_urls or []):
             abort(404)
         return send_from_directory(app.config["PHOTOS_STORAGE_DIR"], filename)
+
+    @app.cli.command("diagnose-customer-login")
+    @click.option("--email", required=True, help="Customer email to check; sends no OTP.")
+    def diagnose_customer_login(email):
+        import json
+        from app.services.login_diagnostics import diagnose
+        click.echo(json.dumps(diagnose(email), indent=2))
 
     @app.cli.command("sync-shopify-returns")
     def sync_shopify_returns():

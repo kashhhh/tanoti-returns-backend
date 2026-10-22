@@ -121,5 +121,37 @@ class AddressPhoneLoginTests(unittest.TestCase):
             self.assertEqual(OTPToken.query.count(), 0)
 
 
+    def test_diagnostic_reports_contact_source_without_sending_or_exposing_contacts(self):
+        import json
+        order = customer_fixtures.CustomerImprovementsTests.login_order_payload(self)
+        account = {**order["customer"], "default_address": {"phone": "9876543210", "country": "India"}}
+        with patch("app.services.shopify_client.find_customer_by_email", return_value=account), \
+                patch("app.services.shopify_client.fetch_orders_for_customer", return_value=[order]), \
+                patch("app.services.whatsapp_service.send_otp_whatsapp") as send:
+            result = self.app.test_cli_runner().invoke(args=["diagnose-customer-login", "--email", account["email"]])
+        self.assertEqual(result.exit_code, 0, result.output)
+        report = json.loads(result.output)
+        self.assertTrue(report["scope_migration_applied"])
+        self.assertTrue(report["default_address_phone_usable"])
+        self.assertEqual(report["email_login_channels"], ["email"])
+        self.assertEqual(report["orders"][0]["phone_source"], "address")
+        self.assertNotIn("9876543210", result.output)
+        self.assertNotIn(account["email"], result.output)
+        send.assert_not_called()
+        self.assertEqual(OTPToken.query.count(), 0)
+
+    def test_diagnostic_reports_missing_configuration_and_lookup_errors_safely(self):
+        import json
+        self.app.config.update(TESTING_MODE=False, WHATSAPP_ACCESS_TOKEN=None)
+        with patch("app.services.shopify_client.find_customer_by_email", side_effect=RuntimeError("secret details")):
+            result = self.app.test_cli_runner().invoke(args=["diagnose-customer-login", "--email", "customer@example.com"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        report = json.loads(result.output)
+        self.assertFalse(report["whatsapp_configured"])
+        self.assertIn("WHATSAPP_ACCESS_TOKEN", report["missing_whatsapp_settings"])
+        self.assertEqual(report["shopify_lookup_error"], "RuntimeError")
+        self.assertNotIn("secret details", result.output)
+
+
 if __name__ == "__main__":
     unittest.main()
