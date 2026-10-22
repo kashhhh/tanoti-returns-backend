@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from flask import Blueprint, request, jsonify, current_app, g
 
 from app.extensions import db
-from app.models import Customer, OTPToken, AdminSettings
+from app.models import Customer, OTPToken, AdminSettings, Order
 from app.services import shopify_client, email_service, sync_service, whatsapp_service
 from app.utils.decorators import login_required
 from app.utils.sessions import create_session, csrf_token, set_session_cookie, logout_response
@@ -45,9 +45,9 @@ def _generate_otp() -> str:
     return "".join(secrets.choice("0123456789") for _ in range(length))
 
 
-def _delivery_options(customer=None):
+def _delivery_options(customer=None, phone=None):
     channels = ["email"]
-    if customer and whatsapp_service.is_configured() and whatsapp_service.registered_phone(customer):
+    if customer and whatsapp_service.is_configured() and (phone or whatsapp_service.registered_phone(customer)):
         channels.append("whatsapp")
     return jsonify({"channels": channels})
 
@@ -65,6 +65,8 @@ def request_otp():
         return jsonify({"error": "WhatsApp login is currently unavailable. Please choose email."}), 503
     email = _email(data)
     shopify_customer = None
+    order = None
+    synced_order = None
     order_id = data.get("order_id") if isinstance(data, dict) else None
     if order_id is not None:
         if email or not isinstance(order_id, str) or not re.fullmatch(r"#?[A-Za-z0-9][A-Za-z0-9_-]{0,63}", order_id.strip()):
@@ -114,7 +116,7 @@ def request_otp():
         return _delivery_options() if options_only else _sent_response(channel=channel)
 
     # Order payloads may omit the linked customer's account phone. Resolve it
-    # for both the chooser and WhatsApp sends/resends, without using order contacts.
+    # for both the chooser and WhatsApp sends/resends before address-only fallback.
     if (order_id is not None and (options_only or channel == "whatsapp")
             and whatsapp_service.is_configured()
             and not whatsapp_service.registered_phone(shopify_customer)):
@@ -127,10 +129,15 @@ def request_otp():
                 and _email(account) == email):
             shopify_customer = account
 
-    if options_only:
-        return _delivery_options(shopify_customer)
-
     phone = whatsapp_service.registered_phone(shopify_customer)
+    order_scope_id = None
+    if not phone and order is not None:
+        phone = whatsapp_service.address_phone(shopify_customer, order)
+        if phone:
+            order_scope_id = synced_order.id
+    if options_only:
+        return _delivery_options(shopify_customer, phone)
+
     if channel == "whatsapp" and not phone:
         return _sent_response(channel=channel)
 
@@ -146,6 +153,7 @@ def request_otp():
     otp = _generate_otp()
     token = OTPToken(
         email=email,
+        order_scope_id=order_scope_id if channel == "whatsapp" else None,
         challenge=secrets.token_urlsafe(32),
         otp_hash=_hash_otp(otp),
         expires_at=datetime.utcnow() + timedelta(minutes=current_app.config["OTP_EXPIRY_MINUTES"]),
@@ -207,9 +215,16 @@ def verify_otp():
 
     customer = Customer.query.filter_by(email=email).first()
 
+    if token.order_scope_id is not None:
+        order = db.session.get(Order, token.order_scope_id)
+        if not customer or not order or order.customer_id != customer.id:
+            return jsonify({"error": "Order access changed. Please request a new code."}), 400
+
     # First-time login: pull their order history so it's ready to browse.
     # (Subsequent syncs happen via webhooks + the manual /resync endpoint.)
-    if not customer.orders or any(not order.shipping_address or
+    if token.order_scope_id is not None:
+        sync_service.refresh_order_if_stale(order)
+    elif not customer.orders or any(not order.shipping_address or
             any(not item.delivered_at and not item.replacement_for and not item.unavailable
                 for item in order.items) for order in customer.orders):
         sync_service.sync_orders_for_customer(customer.shopify_customer_id)
@@ -219,7 +234,7 @@ def verify_otp():
         except Exception:
             current_app.logger.warning("Variant image refresh unavailable")
 
-    raw = create_session("customer", customer.id, customer.email)
+    raw = create_session("customer", customer.id, customer.email, order_scope_id=token.order_scope_id)
     db.session.commit()
     return set_session_cookie(jsonify({
         "csrf_token": csrf_token(raw),

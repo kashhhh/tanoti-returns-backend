@@ -8,7 +8,7 @@ from functools import wraps
 
 from flask import current_app, g, has_request_context, jsonify, request
 from app.extensions import db
-from app.models import AuthSession, Customer
+from app.models import AuthSession, Customer, Order
 
 
 def cookie_name(role):
@@ -24,10 +24,11 @@ def csrf_token(raw):
     return digest("csrf:" + raw)
 
 
-def create_session(role, subject, email):
+def create_session(role, subject, email, order_scope_id=None):
     raw = secrets.token_urlsafe(32)
     hours = current_app.config["ADMIN_SESSION_HOURS" if role == "admin" else "CUSTOMER_SESSION_HOURS"]
     row = AuthSession(token_hash=digest(raw), role=role, subject=str(subject), identity_email=email,
+                      order_scope_id=order_scope_id,
                       expires_at=datetime.utcnow() + timedelta(hours=hours))
     previous = request.cookies.get(cookie_name(role)) if has_request_context() else None
     if previous:
@@ -67,6 +68,11 @@ def session_required(role):
                 if not customer or customer.email != row.identity_email:
                     return jsonify({"error": "Customer identity changed. Please log in again."}), 401
                 g.customer = customer
+                g.order_scope_id = row.order_scope_id
+                if row.order_scope_id is not None:
+                    order = db.session.get(Order, row.order_scope_id)
+                    if not order or order.customer_id != customer.id:
+                        return jsonify({"error": "Order access changed. Please log in again."}), 401
             if request.method not in {"GET", "HEAD", "OPTIONS"}:
                 supplied = request.headers.get("X-CSRF-Token", "")
                 if not hmac.compare_digest(supplied.encode(), csrf_token(raw).encode()):
@@ -80,7 +86,7 @@ def session_required(role):
 
 def logout_response(role, all_sessions=False):
     row = g.auth_session
-    if all_sessions:
+    if all_sessions and not row.order_scope_id:
         AuthSession.query.filter_by(role=role, subject=row.subject).update({"revoked_at": datetime.utcnow()})
     else:
         row.revoked_at = datetime.utcnow()

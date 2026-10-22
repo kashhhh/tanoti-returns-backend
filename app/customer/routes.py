@@ -18,6 +18,11 @@ from app.services import refund_service
 customer_bp = Blueprint("customer", __name__)
 
 
+def _can_access_order(order):
+    return (order.customer_id == g.customer.id and
+            (g.order_scope_id is None or order.id == g.order_scope_id))
+
+
 def _customer_note(form):
     note = (form.get("customer_note") or "").strip()
     if len(note) > 2000:
@@ -27,6 +32,8 @@ def _customer_note(form):
 
 def _refresh_eligibility(order=None):
     try:
+        if order is None and g.order_scope_id is not None:
+            order = db.session.get(Order, g.order_scope_id)
         if order:
             sync_service.refresh_order_if_stale(order)
         else:
@@ -73,7 +80,10 @@ def list_orders():
     settings = AdminSettings.get()
     window_days = settings.return_window_days
 
-    orders = Order.query.filter_by(customer_id=g.customer.id).all()
+    query = Order.query.filter_by(customer_id=g.customer.id)
+    if g.order_scope_id is not None:
+        query = query.filter_by(id=g.order_scope_id)
+    orders = query.all()
 
     eligible, expired = [], []
     for order in orders:
@@ -96,13 +106,13 @@ def search_order():
         return jsonify({"error": "order_number is required"}), 400
 
     order = Order.query.filter_by(customer_id=g.customer.id, order_number=query).first()
-    if not order:
+    if not order or not _can_access_order(order):
         return jsonify({"error": "Order not found"}), 404
 
     refresh_error = _refresh_eligibility(order)
     if refresh_error:
         return refresh_error
-    if order.customer_id != g.customer.id:
+    if not _can_access_order(order):
         return jsonify({"error": "Order not found"}), 404
 
     settings = AdminSettings.get()
@@ -116,10 +126,15 @@ def search_order():
 def my_requests():
     """All of the customer's returns/exchanges, pending and completed --
     the dedicated status page requested."""
-    returns = ReturnRequest.query.filter_by(customer_id=g.customer.id).order_by(
+    returns = ReturnRequest.query.filter_by(customer_id=g.customer.id)
+    exchanges = ExchangeRequest.query.filter_by(customer_id=g.customer.id)
+    if g.order_scope_id is not None:
+        returns = returns.join(OrderItem).filter(OrderItem.order_id == g.order_scope_id)
+        exchanges = exchanges.join(OrderItem).filter(OrderItem.order_id == g.order_scope_id)
+    returns = returns.order_by(
         ReturnRequest.created_at.desc()
     ).all()
-    exchanges = ExchangeRequest.query.filter_by(customer_id=g.customer.id).order_by(
+    exchanges = exchanges.order_by(
         ExchangeRequest.created_at.desc()
     ).all()
 
@@ -170,13 +185,13 @@ def get_order_item(item_id):
     """The 'click a product' detail view: product info + billing info,
     used to render the exchange/return screen."""
     item = OrderItem.query.get_or_404(item_id)
-    if item.order.customer_id != g.customer.id:
+    if not _can_access_order(item.order):
         return jsonify({"error": "Not found"}), 404
 
     refresh_error = _refresh_eligibility(item.order)
     if refresh_error:
         return refresh_error
-    if item.order.customer_id != g.customer.id:
+    if not _can_access_order(item.order):
         return jsonify({"error": "Not found"}), 404
 
     settings = AdminSettings.get()
@@ -223,7 +238,14 @@ def resync_my_orders():
     blocked = limited("customer-resync", str(g.customer.id), 2, 300)
     if blocked is not None:
         return blocked
-    sync_service.sync_orders_for_customer(g.customer.shopify_customer_id)
+    if g.order_scope_id is not None:
+        order = db.session.get(Order, g.order_scope_id)
+        payload = shopify_client.fetch_order(order.shopify_order_id)
+        if str(payload.get("id")) != order.shopify_order_id:
+            return jsonify({"error": "Could not refresh this order"}), 503
+        sync_service.upsert_order(payload)
+    else:
+        sync_service.sync_orders_for_customer(g.customer.shopify_customer_id)
     return jsonify({"message": "Orders synced"})
 
 
@@ -236,12 +258,12 @@ def _claim_unit(item):
 @login_required
 def submit_exchange(item_id):
     item = OrderItem.query.get_or_404(item_id)
-    if item.order.customer_id != g.customer.id:
+    if not _can_access_order(item.order):
         return jsonify({"error": "Not found"}), 404
     refresh_error = _refresh_eligibility(item.order)
     if refresh_error:
         return refresh_error
-    if item.order.customer_id != g.customer.id:
+    if not _can_access_order(item.order):
         return jsonify({"error": "Not found"}), 404
     block = item.request_block_reason(AdminSettings.get().return_window_days)
     if block:
@@ -305,12 +327,12 @@ def submit_exchange(item_id):
 def submit_return(item_id):
     """multipart/form-data: reason, reason_other_text, refund_mode, photo_front, photo_back, pickup_address"""
     item = OrderItem.query.get_or_404(item_id)
-    if item.order.customer_id != g.customer.id:
+    if not _can_access_order(item.order):
         return jsonify({"error": "Not found"}), 404
     refresh_error = _refresh_eligibility(item.order)
     if refresh_error:
         return refresh_error
-    if item.order.customer_id != g.customer.id:
+    if not _can_access_order(item.order):
         return jsonify({"error": "Not found"}), 404
     block = item.request_block_reason(AdminSettings.get().return_window_days)
     if block:

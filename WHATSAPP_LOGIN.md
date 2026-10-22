@@ -15,7 +15,22 @@ Order ID login supports WhatsApp selection, sending, resending and code verifica
 If the order response omits a usable customer phone, the backend looks up the
 linked customer account by email and verifies that both its customer ID and email
 match before using its registered phone. This applies to the delivery chooser and
-WhatsApp sends/resends; order and shipping contact numbers are never used.
+WhatsApp sends/resends.
+
+If no usable account phone exists, **Order ID** login automatically checks the
+order's shipping address phone, then the matched customer's default address phone.
+Only server-fetched Shopify addresses are used. Indian address numbers with ten
+digits (starting 6–9), or twelve digits starting 91, are normalized to +91 format
+only when the address country is India/IN. Other contacts require a +country code.
+The chooser and sends/resends use the same resolution logic. Account phones take
+priority; client-supplied phone numbers and order-level contact fields are ignored.
+
+An address-phone OTP and its resulting session are restricted to that one order.
+Lists, search, item details, return/exchange submission, request history, and
+refresh enforce this restriction on the backend. Logout-all from this restricted
+session logs out only that session. Email and customer-account-phone login retain
+account-wide access. Email login does not use address-phone fallback; the screen
+directs customers to Order ID when WhatsApp is unavailable for their email.
 
 WhatsApp uses Meta Cloud API, matching the existing Tanoti WhatsApp app.
 Configure these **backend-only** environment variables on every deployment:
@@ -34,10 +49,10 @@ It uses a copy-code button, security recommendation and ten-minute expiry notice
 The local ignored `backend/.env` is configured. Production environment variables
 must also be configured when deploying; credentials are never shipped to the frontend.
 
-Only Shopify's customer account `phone` is used, in international format such
-as `+919876543210`. Order/shipping/billing contact numbers and client-supplied
-numbers cannot redirect login codes. Formatting spaces, parentheses, dots and
-hyphens are removed; ambiguous numbers without a country prefix are not used.
+Shopify's customer account `phone` must use international format such
+as `+919876543210`. Formatting spaces, parentheses, dots and hyphens are removed.
+Address-phone fallback follows the order-only rules above; billing contact numbers
+and client-supplied numbers cannot redirect login codes.
 The number must be reachable on WhatsApp. Customers without a suitable number
 can select email. Responses never expose the registered phone. Showing available
 channels before authentication necessarily reveals WhatsApp availability for a
@@ -53,6 +68,15 @@ device delivery; the UI permits resending or returning to select email.
 `TESTING_MODE=true` prints WhatsApp codes locally and sends no WhatsApp messages,
 just like existing console email delivery. Use `TESTING_MODE=false` with the
 approved template for real delivery. No live customer OTP was sent during development.
-No database migration is required.
+Deploy the backend migration before starting the updated app:
+
+```
+flask --app run:app db upgrade
+```
+
+Migration `j41fa507d234` adds nullable `order_scope_id` fields to customer OTPs
+and sessions. Existing credentials retain their previous behavior. Downgrading
+deletes restricted credentials before dropping scope fields to prevent widening
+their access. Rebuild and deploy the frontend with the updated sign-in guidance.
 
 Template format: [Meta authentication template example](https://www.postman.com/meta/whatsapp-business-platform/request/6vkv46u/create-authentication-template-w-otp-copy-code-button).

@@ -6,13 +6,34 @@ from flask import current_app
 
 
 def registered_phone(customer):
-    # Only the customer account phone may grant account access. Never use an
-    # order/shipping contact or a number supplied by the login request.
+    # Only the customer account phone may grant account-wide access.
+    # Address contacts are resolved separately and require an order scope.
     value = customer.get("phone")
     if not isinstance(value, str):
         return None
     value = re.sub(r"[\s().-]", "", value)
     return value if re.fullmatch(r"\+[1-9][0-9]{7,14}", value) else None
+
+
+def address_phone(customer, order):
+    """Server-sourced address contacts are usable only for order-scoped login."""
+    for address in (order.get("shipping_address"), customer.get("default_address")):
+        if not isinstance(address, dict):
+            continue
+        value = address.get("phone")
+        if not isinstance(value, str):
+            continue
+        value = re.sub(r"[\s().-]", "", value)
+        country = str(address.get("country_code") or address.get("country") or "").upper()
+        if country in {"IN", "INDIA"}:
+            if re.fullmatch(r"[6-9][0-9]{9}", value):
+                value = "+91" + value
+            elif re.fullmatch(r"91[6-9][0-9]{9}", value):
+                value = "+" + value
+        phone = registered_phone({"phone": value})
+        if phone:
+            return phone
+    return None
 
 
 def is_configured():
