@@ -10,6 +10,7 @@ from app.services import shopify_client, whatsapp_service
 def diagnose(email):
     report = {
         "address_phone_fallback_code": True,
+        "order_login_requires_return_eligibility": False,
         "whatsapp_configured": whatsapp_service.is_configured(),
         "testing_mode": bool(current_app.config.get("TESTING_MODE")),
         "missing_whatsapp_settings": [key for key in (
@@ -66,8 +67,6 @@ def diagnose(email):
                     reasons = [item.request_block_reason(settings.return_window_days) for item in cached.items]
                     row["cached_eligible_items"] = reasons.count(None)
                     row["cached_item_block_reasons"] = sorted({reason for reason in reasons if reason})
-                    if None not in reasons:
-                        row["blockers"].append("no_eligible_items_in_local_cache")
             else:
                 row["cached_order"] = False
         except Exception as exc:

@@ -147,7 +147,7 @@ class WhatsAppLoginTests(unittest.TestCase):
         self.assertEqual(OTPToken.query.one().challenge, first.json["challenge"])
         self.assertEqual(self.issue(route="delivery-options")[0].status_code, 429)
 
-    def test_order_delivery_options_match_phone_and_eligibility(self):
+    def test_order_delivery_options_depend_on_phone_not_return_eligibility(self):
         order = customer_fixtures.CustomerImprovementsTests.login_order_payload(self)
         for phone in (None, "+919876543210"):
             order["customer"]["phone"] = phone
@@ -158,7 +158,7 @@ class WhatsAppLoginTests(unittest.TestCase):
         order["fulfillments"] = []
         with patch("app.auth.routes.shopify_client.find_order_for_login", return_value=order):
             result = self.client.post("/api/auth/delivery-options", json={"order_id": "100"})
-        self.assertEqual(result.json, {"channels": ["email"]})
+        self.assertEqual(result.json, {"channels": ["email", "whatsapp"]})
         self.assertEqual(OTPToken.query.count(), 0)
 
     def test_order_whatsapp_resolves_account_phone_for_options_send_resend_and_verify(self):

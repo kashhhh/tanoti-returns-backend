@@ -121,6 +121,37 @@ class AddressPhoneLoginTests(unittest.TestCase):
             self.assertEqual(OTPToken.query.count(), 0)
 
 
+    def test_address_phone_login_for_expired_and_claimed_orders(self):
+        for state in ("expired", "claimed"):
+            with self.subTest(state=state):
+                OTPToken.query.delete()
+                item = db.session.get(OrderItem, self.item_id)
+                item.request_claimed = state == "claimed"
+                db.session.commit()
+                order = customer_fixtures.CustomerImprovementsTests.login_order_payload(self)
+                if state == "expired":
+                    order["fulfillments"][0]["delivered_at"] = (datetime.utcnow() - timedelta(days=30)).isoformat()
+                account = {**order["customer"], "default_address": {"phone": "9876543210", "country": "India"}}
+                with patch("app.auth.routes.shopify_client.find_order_for_login", return_value=order), \
+                        patch("app.auth.routes.shopify_client.find_customer_by_email", return_value=account), \
+                        patch("app.auth.routes.whatsapp_service.send_otp_whatsapp") as send:
+                    options = self.client.post("/api/auth/delivery-options", json={"order_id": "100"})
+                    self.assertEqual(options.json, {"channels": ["email", "whatsapp"]})
+                    response = self.client.post("/api/auth/request-otp", json={"order_id": "100", "channel": "whatsapp"})
+                    self.assertEqual(response.status_code, 200)
+                    login = self.client.post("/api/auth/verify-otp", json={
+                        "challenge": response.json["challenge"], "otp": send.call_args.args[1]})
+                    self.assertEqual(login.status_code, 200)
+                headers = {"Cookie": login.headers["Set-Cookie"].split(";", 1)[0],
+                           "X-CSRF-Token": login.json["csrf_token"]}
+                listing = self.client.get("/api/customer/orders", headers=headers)
+                self.assertEqual(listing.status_code, 200)
+                self.assertEqual(listing.json["eligible"], [])
+                self.assertEqual(len(listing.json["expired"]), 1)
+                for kind in ("return", "exchange"):
+                    rejected = self.client.post(f"/api/customer/order-items/{self.item_id}/{kind}", headers=headers)
+                    self.assertEqual(rejected.status_code, 400)
+
     def test_diagnostic_reports_contact_source_without_sending_or_exposing_contacts(self):
         import json
         order = customer_fixtures.CustomerImprovementsTests.login_order_payload(self)
@@ -135,6 +166,7 @@ class AddressPhoneLoginTests(unittest.TestCase):
         self.assertTrue(report["default_address_phone_usable"])
         self.assertEqual(report["email_login_channels"], ["email"])
         self.assertEqual(report["orders"][0]["phone_source"], "address")
+        self.assertFalse(report["order_login_requires_return_eligibility"])
         self.assertNotIn("9876543210", result.output)
         self.assertNotIn(account["email"], result.output)
         send.assert_not_called()

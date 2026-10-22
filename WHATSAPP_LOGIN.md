@@ -4,7 +4,10 @@ Customers can identify their account by email or order ID, then choose email
 or WhatsApp for the login code. Clicking Continue checks `/api/auth/delivery-options`
 before showing delivery choices. WhatsApp is shown only when the matched customer
 has a usable registered phone and WhatsApp delivery is configured. Missing or
-invalid phone numbers, unknown accounts and ineligible orders show email only.
+invalid phone numbers and unknown accounts show email only. Order login does not
+require a return-eligible item: customers can view unavailable/expired items and
+track requests already submitted. New returns and exchanges still enforce all
+item eligibility checks. Address-phone sessions remain restricted to one order.
 Editing the identifier or changing sign-in methods resets the choices and checks
 again. This lookup sends no code and has separate per-identifier limits plus the
 shared login IP/email limits. Email remains the default. Requests and resends
@@ -87,8 +90,8 @@ If only email is offered through both methods, run from the deployed backend:
 
 This checks the deployed configuration, scope migration, Shopify customer phone
 sources, order identity matches, and locally cached item eligibility. It sends no
-OTP and changes no records. Cached eligibility is labeled explicitly because the
-normal order-login lookup refreshes the order from Shopify before deciding.
+OTP and changes no records. Cached eligibility is informational and never blocks
+login. Normal order login refreshes the order from Shopify before signing in.
 Output omits contact values, tokens, and provider error bodies. An unknown command
 means the deployed backend does not yet include these diagnostics.
 

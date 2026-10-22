@@ -30,9 +30,10 @@ class CustomerImprovementsTests(unittest.TestCase):
         self.assertEqual(send.call_args.args[0], "customer@example.com")
         return result.json["challenge"], send.call_args.args[1]
 
-    def test_ineligible_order_never_sends_a_code(self):
+    def test_ineligible_orders_allow_login_but_block_new_requests(self):
         for state in ("unfulfilled", "expired", "cancelled", "refunded", "claimed"):
             with self.subTest(state=state):
+                OTPToken.query.delete()
                 order = self.login_order_payload()
                 item = db.session.get(OrderItem, self.item_id)
                 item.request_claimed = state == "claimed"
@@ -48,8 +49,12 @@ class CustomerImprovementsTests(unittest.TestCase):
                 with patch.object(shopify_client, "find_order_for_login", return_value=order), patch("app.auth.routes.email_service.send_otp_email") as send:
                     result = self.client.post("/api/auth/request-otp", json={"order_id": "100"})
                 self.assertEqual(result.status_code, 200)
-                send.assert_not_called()
-                self.assertEqual(OTPToken.query.count(), 0)
+                send.assert_called_once()
+                self.assertEqual(OTPToken.query.count(), 1)
+                for kind in ("return", "exchange"):
+                    response = self.client.post(f"/api/customer/order-items/{self.item_id}/{kind}",
+                                                headers=self.customer_headers)
+                    self.assertEqual(response.status_code, 400)
 
     def test_unknown_or_mismatched_email_never_sends_a_code(self):
         for customer in (None, {"id": "10", "email": "someoneelse@example.com"}):

@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from flask import Blueprint, request, jsonify, current_app, g
 
 from app.extensions import db
-from app.models import Customer, OTPToken, AdminSettings, Order
+from app.models import Customer, OTPToken, Order
 from app.services import shopify_client, email_service, sync_service, whatsapp_service
 from app.utils.decorators import login_required
 from app.utils.sessions import create_session, csrf_token, set_session_cookie, logout_response
@@ -35,7 +35,7 @@ def _email(data):
 def _sent_response(token=None, channel="email"):
     delivery = "console" if current_app.config.get("TESTING_MODE") else channel
     challenge = token.challenge if token else secrets.token_urlsafe(32)
-    return jsonify({"message": "If these details match an eligible account with the selected contact method, a code has been sent.",
+    return jsonify({"message": "If these details match an account with the selected contact method, a code has been sent.",
                     "challenge": challenge,
                     "delivery": delivery, "expires_in_minutes": current_app.config["OTP_EXPIRY_MINUTES"]})
 
@@ -86,13 +86,13 @@ def request_otp():
             return _delivery_options() if options_only else _sent_response(channel=channel)
         try:
             synced_order = sync_service.upsert_order(order)
-            days = AdminSettings.get().return_window_days
-            if not synced_order or not any(item.request_block_reason(days) is None
-                                           for item in synced_order.items):
+            # Authentication also serves order viewing and request tracking.
+            # Enforce return eligibility when displaying/submitting each item.
+            if not synced_order:
                 return _delivery_options() if options_only else _sent_response(channel=channel)
         except Exception:
             db.session.rollback()
-            current_app.logger.warning("Order eligibility lookup unavailable")
+            current_app.logger.warning("Order login sync unavailable")
             return jsonify({"error": "Login is temporarily unavailable. Please try again shortly."}), 503
     if not email:
         return jsonify({"error": "Enter a valid email address"}), 400
