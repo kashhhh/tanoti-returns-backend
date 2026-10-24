@@ -38,6 +38,26 @@ class BookingRejected(ValueError):
     pass
 
 
+def booking_failure(result):
+    """Translate carrier errors without exposing response bodies or customer data."""
+    parts = [result.get(key) for key in ("rmk", "remarks", "message", "error")]
+    packages = result.get("packages") or []
+    if isinstance(packages, list):
+        for package in packages:
+            if isinstance(package, dict):
+                parts.extend(package.get(key) for key in ("remarks", "rmk", "message"))
+    message = " ".join(str(part) for part in parts if part).lower()
+    if any(term in message for term in ("insufficient balance", "insufficient fund", "wallet balance", "low balance")):
+        return "Wallet recharge needed. Recharge your Delhivery wallet, then retry booking."
+    if any(term in message for term in ("not serviceable", "non serviceable", "unserviceable")):
+        return "Service unavailable. Check the pincode and that this service is enabled on your Delhivery account."
+    if "pickup location" in message or "warehouse" in message:
+        return "Warehouse setup needs attention. Check the registered Delhivery pickup location."
+    if any(term in message for term in ("pincode", "pin code", "phone", "address")):
+        return "Address needs attention. Check the customer address, phone number and pincode."
+    return "Booking confirmation pending. Check booking to retrieve the shipment from Delhivery."
+
+
 class TrackingError(ValueError):
     """A safe, actionable tracking diagnostic, without carrier response bodies."""
 
@@ -144,16 +164,20 @@ def _manifest(payload, number, leg):
             data={"format": "json", "data": json.dumps(payload)}, timeout=20)
         if response.status_code in (401, 403):
             raise BookingRejected("Delhivery rejected the API credentials. Check the token and environment, then retry.")
-        response.raise_for_status()
         result = response.json()
+        if response.status_code >= 400 and isinstance(result, dict):
+            raise BookingUncertain(booking_failure(result))
+        response.raise_for_status()
+        if not isinstance(result, dict):
+            raise BookingUncertain("Booking confirmation pending. Check booking again shortly.")
         packages = result.get("packages") or []
         if result.get("success") is not True or len(packages) != 1:
-            raise BookingUncertain("Delhivery did not confirm the shipment. It may have been partially saved; check Delhivery One.")
+            raise BookingUncertain(booking_failure(result))
         package = packages[0]
         waybill = str(package.get("waybill") or "")
         if (not re.fullmatch(r"[0-9]{8,32}", waybill) or package.get("status") != "Success"
                 or str(package.get("refnum")) != reference):
-            raise BookingUncertain("Delhivery's response did not match this shipment. Verify the waybill in Delhivery One.")
+            raise BookingUncertain(booking_failure(result))
         booking = db.session.execute(db.select(ShippingBooking).filter_by(reference=reference).with_for_update()).scalar_one()
         if booking.state == "confirmed" and booking.waybill != waybill:
             raise BookingUncertain("A different waybill was already reconciled. Review this shipment in Delhivery One.")
@@ -168,7 +192,7 @@ def _manifest(payload, number, leg):
         raise
     except Exception as exc:
         db.session.rollback()
-        message = str(exc) if isinstance(exc, BookingUncertain) else "Delhivery booking could not be confirmed. Check Delhivery One before taking further action."
+        message = str(exc) if isinstance(exc, BookingUncertain) else "Booking confirmation pending. Check booking again shortly; a duplicate will not be created."
         ShippingBooking.query.filter_by(reference=reference, state="pending").update({"state": "uncertain", "error": message, "updated_at": datetime.utcnow()})
         db.session.commit()
         raise BookingUncertain(message) from exc
@@ -244,6 +268,64 @@ def reconcile(number, leg, waybill):
     return "delhivery", str(waybill), booking.carrier_status or "scheduled"
 
 
+def check_booking(number, leg):
+    """Recover by exact order reference; an empty lookup is NOT proof of rejection."""
+    lock_login("shipping:" + reference_for(number, leg))
+    booking = current_booking(number, leg)
+    if not booking or booking.environment != current_app.config["DELHIVERY_ENVIRONMENT"]:
+        raise BookingUncertain("Use the original booking's Delhivery environment to check its status.")
+    if booking.waybill:
+        return reconcile(number, leg, booking.waybill)
+    try:
+        response = requests.get(_base_url() + "/api/v1/packages/json/", headers=_headers(),
+                                params={"ref_ids": booking.reference}, timeout=15)
+        response.raise_for_status()
+        result = response.json()
+        if not isinstance(result, dict) or not isinstance(result.get("ShipmentData"), list):
+            raise TrackingError("Delhivery returned an unreadable booking lookup. Try again shortly.")
+        shipments = [entry.get("Shipment") for entry in result["ShipmentData"] if isinstance(entry, dict)]
+        matches = [shipment for shipment in shipments if isinstance(shipment, dict)
+                   and str(shipment.get("ReferenceNo")) == booking.reference]
+        if len(matches) != 1 or not re.fullmatch(r"[0-9]{8,32}", str(matches[0].get("AWB") or "")):
+            raise BookingUncertain("Delhivery has not returned a unique shipment yet. Try again shortly. If this persists, use Advanced recovery after checking with Delhivery.")
+        # Verify the waybill independently before attaching it to this request.
+        return reconcile(number, leg, str(matches[0]["AWB"]))
+    except BookingUncertain:
+        raise
+    except Exception as exc:
+        raise BookingUncertain(tracking_error_message(exc)) from exc
+
+
+def confirm_not_created(number, leg, reference, confirmed):
+    """Audited operator fallback after Delhivery confirms a missing shipment."""
+    from datetime import timedelta
+    from app.utils.audit import record_admin_action
+    lock_login("shipping:" + reference_for(number, leg))
+    booking = current_booking(number, leg)
+    if (confirmed is not True or not booking or booking.reference != reference
+            or booking.state not in ("pending", "uncertain") or booking.waybill):
+        raise BookingUncertain("Refresh this request and confirm with Delhivery that no shipment exists.")
+    if booking.environment != current_app.config["DELHIVERY_ENVIRONMENT"]:
+        raise BookingUncertain("Use the original booking's Delhivery environment.")
+    if datetime.utcnow() - booking.updated_at < timedelta(minutes=2):
+        raise BookingUncertain("The booking may still be processing. Wait two minutes and check booking first.")
+    # Even the manual fallback must first check for a shipment; outages and
+    # malformed responses cannot authorize a new attempt.
+    response = requests.get(_base_url() + "/api/v1/packages/json/", headers=_headers(),
+                            params={"ref_ids": reference}, timeout=15)
+    response.raise_for_status()
+    result = response.json()
+    if not isinstance(result, dict) or result.get("ShipmentData") != []:
+        raise BookingUncertain("The lookup did not confirm an empty result. Use Check booking or contact Delhivery.")
+    booking.state = "superseded"
+    attempt = booking.attempt + 1
+    db.session.add(ShippingBooking(reference=reference_for(number, leg, attempt), request_number=number,
+        leg=leg, attempt=attempt, environment=booking.environment, warehouse=booking.warehouse,
+        state="not_attempted"))
+    record_admin_action("shipment_confirmed_not_created", reference)
+    db.session.commit()
+
+
 def _carrier_date(value):
     from datetime import timedelta, timezone
     try:
@@ -261,6 +343,9 @@ def record_tracking(booking, shipment):
     booking.carrier_status_code = str(shipment.get("NSLCode") or "")[:32]
     booking.tracking_checked_at = datetime.utcnow()
     booking.tracking_error = None
+    # Store only a sanitized, actionable reason, never the raw tracking payload.
+    reason = booking_failure({"message": status.get("Instructions")})
+    booking.error = reason if not reason.startswith("Booking confirmation pending") else None
     if booking.action_state not in ("pending", "submitted", "uncertain"):
         return
     scan_date = _carrier_date(status.get("StatusDateTime"))
@@ -333,7 +418,10 @@ def cancel_shipment(req, kind, leg):
         response.raise_for_status()
         result = response.json()
         if isinstance(result, dict) and (result.get("status") is False or result.get("success") is False):
-            raise BookingRejected("Delhivery rejected cancellation. Refresh tracking and review the shipment in Delhivery One.")
+            reason = booking_failure(result)
+            if reason.startswith("Wallet recharge needed"):
+                raise BookingRejected("Cancellation failed: insufficient wallet balance. Recharge your Delhivery wallet, then retry cancellation.")
+            raise BookingRejected("Cancellation was rejected. Check status; the existing shipment is still active.")
         # HTTP acceptance is not cancellation. Only authenticated tracking
         # confirming the target status can complete the action.
         booking = db.session.execute(db.select(ShippingBooking).filter_by(reference=booking.reference).with_for_update()).scalar_one()
@@ -356,7 +444,7 @@ def cancel_shipment(req, kind, leg):
         raise BookingUncertain(message) from exc
 
 
-def prepare_rebooking(req, kind, leg, expected_reference):
+def prepare_rebooking(req, kind, leg, expected_reference, stock_ready=False):
     """Fence a new attempt only after authenticated terminal tracking of the old one."""
     from app.utils.audit import record_admin_action
     number = req.return_number if kind == "return" else req.exchange_number
@@ -368,6 +456,8 @@ def prepare_rebooking(req, kind, leg, expected_reference):
     if not is_cancelled(leg, booking.carrier_status) or booking.action_state in ACTION_PENDING:
         db.session.commit()
         raise BookingUncertain("Cancellation is not confirmed. Refresh tracking before rebooking.")
+    if leg == "replacement" and booking.carrier_status.lower() == "returned" and stock_ready is not True:
+        raise ValueError("Confirm that the parcel is back or replacement stock is ready before rebooking.")
     if booking.warehouse != current_app.config.get("DELHIVERY_PICKUP_LOCATION"):
         raise ValueError("Use the original booking's warehouse before rebooking")
     # Validate locally before retiring a recoverable shipment.

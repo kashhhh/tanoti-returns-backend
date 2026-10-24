@@ -498,6 +498,8 @@ def confirm_shipment(kind, number):
 
 
 @admin_bp.post("/requests/<kind>/<number>/book-shipment")
+@admin_bp.post("/requests/<kind>/<number>/check-shipment")
+@admin_bp.post("/requests/<kind>/<number>/confirm-no-shipment")
 @admin_bp.post("/requests/<kind>/<number>/rebook-shipment")
 @admin_bp.post("/requests/<kind>/<number>/reconcile-shipment")
 @admin_required
@@ -522,7 +524,20 @@ def recover_shipment(kind, number):
     reconciling = request.path.endswith("/reconcile-shipment")
     if existing and reconciling and data.get("waybill", "") != existing:
         return jsonify(error="Verify the tracking number already recorded on this request."), 409
-    if existing and not rebook and not reconciling:
+    checking = request.path.endswith("/check-shipment")
+    if request.path.endswith("/confirm-no-shipment"):
+        if existing:
+            return jsonify(error="A tracking number is already saved. Check booking instead."), 409
+        try:
+            shipping_service.confirm_not_created(number, leg, data.get("reference"), data.get("confirmed"))
+            return jsonify(_row(req, kind))
+        except ValueError as exc:
+            db.session.rollback()
+            return jsonify(error=str(exc), request=_row(req, kind)), 409
+        except Exception:
+            db.session.rollback()
+            return jsonify(error="Delhivery could not be checked. Try again shortly; no booking was changed."), 503
+    if existing and not rebook and not reconciling and not checking:
         return jsonify(_row(req, kind))
     try:
         if rebook:
@@ -530,12 +545,14 @@ def recover_shipment(kind, number):
                 variant = shopify_client.select_exchange_variant(req.order_item, req.requested_size)
                 if variant["id"] != req.requested_variant_id:
                     return jsonify({"error": "Replacement variant changed. Review the request before booking."}), 409
-            shipping_service.prepare_rebooking(req, kind, leg, data.get("reference"))
+            shipping_service.prepare_rebooking(req, kind, leg, data.get("reference"), data.get("stock_ready"))
             booking = shipping_service.booking_details(number)[leg]
-        if request.path.endswith("/reconcile-shipment"):
+        if checking:
+            carrier, waybill, status = shipping_service.check_booking(number, leg)
+        elif request.path.endswith("/reconcile-shipment"):
             carrier, waybill, status = shipping_service.reconcile(number, leg, data.get("waybill", ""))
         elif booking["state"] not in ("not_attempted", "confirmed"):
-            return jsonify({"error": "The previous attempt is uncertain. Verify its waybill instead of retrying."}), 409
+            return jsonify({"error": "Booking confirmation pending. Use Check booking before retrying."}), 409
         elif outbound:
             variant = shopify_client.select_exchange_variant(req.order_item, req.requested_size)
             if variant["id"] != req.requested_variant_id:
@@ -599,10 +616,10 @@ def cancel_shipment(kind, number):
         return jsonify(_row(req, kind))
     except ValueError as exc:
         db.session.rollback()
-        return jsonify(error=str(exc)), 409
+        return jsonify(error=str(exc), request=_row(req, kind)), 409
     except Exception:
         db.session.rollback()
-        return jsonify(error="Could not verify Delhivery status. No new cancellation was submitted."), 503
+        return jsonify(error="Could not check cancellation status. Check status before retrying.", request=_row(req, kind)), 503
 
 
 @admin_bp.post("/requests/<kind>/<number>/retry-emails")

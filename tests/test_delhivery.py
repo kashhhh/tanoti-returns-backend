@@ -306,7 +306,8 @@ class DelhiveryTests(unittest.TestCase):
             self.action(number, "accept-parcel", kind="exchange")
         with patch.object(shipping, "fetch_tracking", return_value=self.tracking(number + "-F", "Returned")), \
                 patch.object(shipping.requests, "post", return_value=self.rebook_response(number, "replacement")):
-            result = self.action(number, "rebook-shipment", kind="exchange", leg="replacement", reference=number + "-F")
+            self.assertEqual(self.action(number, "rebook-shipment", kind="exchange", leg="replacement", reference=number + "-F").status_code, 400)
+            result = self.action(number, "rebook-shipment", kind="exchange", leg="replacement", reference=number + "-F", stock_ready=True)
         self.assertEqual(result.status_code, 200, result.json)
         self.assertEqual(result.json["outbound_tracking_id"], "2234567890123")
         with patch.object(shipping, "fetch_tracking", return_value=self.tracking(number + "-F-2", "Delivered", StatusType="DL")) as fetch:
@@ -462,3 +463,126 @@ class DelhiveryTests(unittest.TestCase):
             fetch.assert_not_called()
         self.assertEqual(result.status_code, 503)
         self.assertIn("different Delhivery environment", result.json["error"])
+
+    def uncertain_pickup(self):
+        number = self.submit().json["return_number"]
+        with patch.object(shipping.requests, "post", side_effect=TimeoutError()):
+            self.action(number, "accept-photos")
+        return number
+
+    def test_wallet_error_is_actionable_but_partial_booking_stays_fenced(self):
+        number = self.submit().json["return_number"]
+        response = Mock(status_code=200)
+        response.json.return_value = {"success": False, "packages": [],
+            "rmk": "client manifest charge API failed due to insufficient balance. Package might have been partially saved. SECRET"}
+        with patch.object(shipping.requests, "post", return_value=response) as post:
+            self.action(number, "accept-photos")
+            self.assertEqual(self.action(number, "book-shipment", leg="pickup").status_code, 409)
+            post.assert_called_once()
+        booking = shipping.current_booking(number, "pickup")
+        self.assertEqual(booking.state, "uncertain")
+        self.assertIn("Wallet recharge needed", booking.error)
+        self.assertNotIn("SECRET", booking.error)
+
+    def test_reference_lookup_recovers_without_creating_and_notifies_once(self):
+        number = self.uncertain_pickup()
+        response = Mock(status_code=200)
+        shipment = self.tracking(number + "-R", "Scheduled")
+        response.json.return_value = {"ShipmentData": [{"Shipment": shipment}]}
+        with patch.object(shipping.requests, "get", return_value=response) as get, patch.object(shipping.requests, "post") as post:
+            result = self.action(number, "check-shipment", leg="pickup")
+            self.assertEqual(result.status_code, 200, result.json)
+            self.assertEqual(get.call_args_list[0].kwargs["params"], {"ref_ids": number + "-R"})
+            self.assertEqual(self.action(number, "check-shipment", leg="pickup").status_code, 200)
+            post.assert_not_called()
+        self.assertEqual(result.json["pickup_tracking_id"], "1234567890123")
+        self.assertEqual(Notification.query.filter_by(event_key=number + ":pickup_booked").count(), 1)
+
+    def test_lookup_empty_duplicate_unrelated_and_malformed_results_stay_fenced(self):
+        number = self.uncertain_pickup()
+        shipment = {"Shipment": self.tracking(number + "-R", "Scheduled")}
+        for data in ([], [shipment, shipment], [{"Shipment": self.tracking("OTHER")}], "bad"):
+            response = Mock(status_code=200)
+            response.json.return_value = {"ShipmentData": data}
+            with patch.object(shipping.requests, "get", return_value=response), patch.object(shipping.requests, "post") as post:
+                result = self.action(number, "check-shipment", leg="pickup")
+                self.assertEqual(result.status_code, 409)
+                post.assert_not_called()
+            self.assertEqual(shipping.current_booking(number, "pickup").state, "uncertain")
+
+    def test_manual_absence_resolution_requires_confirmation_age_and_empty_lookup(self):
+        number = self.uncertain_pickup()
+        args = {"leg": "pickup", "reference": number + "-R", "confirmed": True}
+        with patch.object(shipping.requests, "get") as get:
+            self.assertEqual(self.action(number, "confirm-no-shipment", **args).status_code, 409)
+            get.assert_not_called()
+        booking = shipping.current_booking(number, "pickup")
+        booking.updated_at -= timedelta(minutes=3)
+        db.session.commit()
+        response = Mock(status_code=200)
+        response.json.return_value = {"ShipmentData": []}
+        with patch.object(shipping.requests, "get", return_value=response), patch.object(shipping.requests, "post") as post:
+            self.assertEqual(self.action(number, "confirm-no-shipment", **{**args, "confirmed": False}).status_code, 409)
+            result = self.action(number, "confirm-no-shipment", **args)
+            self.assertEqual(result.status_code, 200, result.json)
+            self.assertEqual(self.action(number, "confirm-no-shipment", **args).status_code, 409)
+            post.assert_not_called()
+        self.assertEqual(shipping.current_booking(number, "pickup").state, "not_attempted")
+        self.assertEqual(shipping.current_booking(number, "pickup").attempt, 2)
+        with patch.object(shipping.requests, "post", return_value=self.rebook_response(number)):
+            self.assertEqual(self.action(number, "book-shipment", leg="pickup").status_code, 200)
+
+    def test_manual_absence_resolution_does_not_bypass_existing_shipment(self):
+        number = self.uncertain_pickup()
+        shipping.current_booking(number, "pickup").updated_at -= timedelta(minutes=3)
+        db.session.commit()
+        response = Mock(status_code=200)
+        response.json.return_value = {"ShipmentData": [{"Shipment": self.tracking(number + "-R")}]}
+        with patch.object(shipping.requests, "get", return_value=response):
+            self.assertEqual(self.action(number, "confirm-no-shipment", leg="pickup", reference=number + "-R", confirmed=True).status_code, 409)
+        self.assertEqual(ShippingBooking.query.count(), 1)
+
+    def test_cancelled_wallet_shipment_keeps_reason_and_can_rebook(self):
+        number = self.booked_pickup()
+        shipment = self.tracking(number + "-R", "Cancelled", Instructions="Insufficient balance")
+        with patch.object(shipping, "fetch_tracking", return_value=shipment):
+            result = self.action(number, "refresh-tracking")
+        self.assertTrue(result.json["shipping_bookings"]["pickup"]["can_rebook"])
+        self.assertIn("Wallet recharge needed", result.json["shipping_bookings"]["pickup"]["error"])
+
+    def test_recovery_endpoints_require_admin(self):
+        number = self.uncertain_pickup()
+        for endpoint in ("check-shipment", "confirm-no-shipment"):
+            result = self.client.post(f"/api/admin/requests/return/{number}/{endpoint}", json={"leg": "pickup"}, headers=self.customer_headers)
+            self.assertEqual(result.status_code, 401)
+
+    def test_wallet_error_on_http_failure_is_not_discarded(self):
+        number = self.submit().json["return_number"]
+        response = Mock(status_code=400)
+        response.json.return_value = {"message": "Insufficient balance"}
+        with patch.object(shipping.requests, "post", return_value=response):
+            self.action(number, "accept-photos")
+        self.assertIn("Wallet recharge needed", shipping.current_booking(number, "pickup").error)
+
+    def test_wallet_cancel_rejection_can_retry_without_rebooking(self):
+        number = self.booked_pickup()
+        response = Mock(status_code=200)
+        response.json.return_value = {"status": False, "message": "Insufficient balance"}
+        with patch.object(shipping, "fetch_tracking", return_value=self.tracking(number + "-R", "Scheduled")), patch.object(shipping.requests, "post", return_value=response):
+            result = self.action(number, "cancel-shipment", leg="pickup")
+        self.assertEqual(result.status_code, 409)
+        self.assertIn("retry cancellation", result.json["error"])
+        booking = shipping.current_booking(number, "pickup")
+        self.assertEqual(booking.action_state, "rejected")
+        self.assertFalse(shipping.booking_details(number)["pickup"]["can_rebook"])
+
+    def test_lookup_of_cancelled_shipment_enables_rebook_without_booked_email(self):
+        number = self.uncertain_pickup()
+        response = Mock(status_code=200)
+        response.json.return_value = {"ShipmentData": [{"Shipment": self.tracking(number + "-R", "Cancelled")}]}
+        with patch.object(shipping.requests, "get", return_value=response), patch.object(shipping.requests, "post") as post:
+            result = self.action(number, "check-shipment", leg="pickup")
+            post.assert_not_called()
+        self.assertEqual(result.status_code, 200)
+        self.assertTrue(result.json["shipping_bookings"]["pickup"]["can_rebook"])
+        self.assertIsNone(Notification.query.filter_by(event_key=number + ":pickup_booked").first())
