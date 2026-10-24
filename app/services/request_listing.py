@@ -11,6 +11,16 @@ STAGES = ("pending", "pickup_pending", "awaiting_parcel", "parcel_received", "re
           "gift_card_issued", "refund_paid", "replacement_pending", "shipment_booked", "delivered", "rejected",
           "pickup_cancelled", "replacement_cancelled", "no_refund_due")
 
+BOARD_COLUMNS = {
+    "review": ("pending",),
+    "pickup": ("pickup_pending", "awaiting_parcel", "pickup_cancelled"),
+    "inspection": ("parcel_received",),
+    "refund": ("refund_approved",),
+    "replacement": ("replacement_pending", "shipment_booked", "replacement_cancelled"),
+    "completed": ("gift_card_issued", "refund_paid", "delivered", "no_refund_due"),
+    "rejected": ("rejected",),
+}
+
 
 def branch(model, kind):
     completed = (case((model.net_refund_amount == 0, "no_refund_due"), (model.refund_paid_at.isnot(None), "refund_paid"), (func.coalesce(model.gift_card_code, "") != "", "gift_card_issued"), else_="refund_approved")
@@ -46,6 +56,9 @@ def list_page(args):
     if page < 1 or per_page not in (10, 25, 50):
         raise ValueError("Page must be positive; page size must be 10, 25 or 50")
     stage = args.get("stage", "all")
+    column = args.get("board_column")
+    if column and (column not in BOARD_COLUMNS or stage != "all"):
+        raise ValueError("Invalid board column or stage combination")
     kind = args.get("type", "all")
     sort = args.get("sort", "oldest")
     if stage not in (*STAGES, "all", "attention") or kind not in ("return", "exchange", "all") or sort not in ("oldest", "newest"):
@@ -78,10 +91,12 @@ def list_page(args):
     counts.update(dict(db.session.execute(select(records.c.stage, func.count()).where(*filters).group_by(records.c.stage)).all()))
     counts["all"] = sum(counts.values())
     counts["attention"] = db.session.execute(select(func.count()).select_from(records).where(*filters, records.c.attention)).scalar_one()
-    total = counts[stage]
+    total = sum(counts[s] for s in BOARD_COLUMNS[column]) if column else counts[stage]
     pages = max(1, ceil(total / per_page))
     page = min(page, pages)
-    if stage == "attention":
+    if column:
+        filters.append(records.c.stage.in_(BOARD_COLUMNS[column]))
+    elif stage == "attention":
         filters.append(records.c.attention)
     elif stage != "all":
         filters.append(records.c.stage == stage)
