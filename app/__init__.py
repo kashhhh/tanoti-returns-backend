@@ -13,7 +13,9 @@ def create_app(config_class=Config):
     @app.errorhandler(413)
     def request_too_large(error):
         message = "Request is too large. Please reduce its size and try again."
-        if request.mimetype == "multipart/form-data":
+        if request.path.startswith("/api/admin/videos"):
+            message = f"Video is too large. Maximum size is {app.config['MAX_VIDEO_UPLOAD_MB']} MB."
+        elif request.mimetype == "multipart/form-data":
             message = "Your photos are too large to upload. Choose smaller photos (up to 10 MB each) and try again."
         return jsonify(error=message), 413
 
@@ -39,6 +41,8 @@ def create_app(config_class=Config):
     app.register_blueprint(auth_bp, url_prefix="/api/auth")
     app.register_blueprint(customer_bp, url_prefix="/api/customer")
     app.register_blueprint(admin_bp, url_prefix="/api/admin")
+    from app.admin.videos import videos_bp
+    app.register_blueprint(videos_bp, url_prefix="/api/admin/videos")
     app.register_blueprint(webhooks_bp, url_prefix="/api/webhooks/shopify")
 
     # Evidence is private. Never expose this directory through an nginx alias.

@@ -9,6 +9,7 @@ Group=tanoti
 WorkingDirectory=/srv/tanoti/backend
 EnvironmentFile=/etc/tanoti/backend.env
 Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=VIDEOS_STORAGE_DIR=/var/lib/tanoti/videos
 ExecStart=/srv/tanoti/backend/venv/bin/gunicorn --bind 127.0.0.1:8000 --workers 2 --timeout 60 --limit-request-line 4094 --limit-request-fields 50 --error-logfile - run:app
 Restart=on-failure
 RestartSec=5

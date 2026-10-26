@@ -63,6 +63,7 @@ def _row(obj, kind: str, repeat_flags=None) -> dict:
         "image_url": obj.order_item.image_url,
         "size": obj.order_item.size,
         "order_number": obj.order_item.order.order_number,
+        "order_id": obj.order_item.order_id,
         "status": obj.status.value,
         "stage": stage_for(obj, kind),
         "rejected_stage": obj.rejected_stage,

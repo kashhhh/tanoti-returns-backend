@@ -17,3 +17,5 @@ security-install-report.json
 *.sql
 *.dump
 .deployed-revision
+
+private_videos/

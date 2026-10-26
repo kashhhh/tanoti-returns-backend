@@ -119,6 +119,20 @@ class Order(db.Model):
         return datetime.utcnow() <= deadline
 
 
+class OrderVideo(db.Model):
+    __tablename__ = "order_videos"
+
+    id = db.Column(db.String(32), primary_key=True)
+    order_id = db.Column(db.Integer, db.ForeignKey("orders.id"), nullable=False, index=True)
+    kind = db.Column(db.String(32), nullable=False)
+    request_number = db.Column(db.String(20), nullable=True)
+    content_type = db.Column(db.String(32), nullable=False)
+    size_bytes = db.Column(db.BigInteger, nullable=False)
+    sha256 = db.Column(db.String(64), nullable=False)
+    created_by = db.Column(db.String(255), nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+
+
 class OrderItem(db.Model):
     __tablename__ = "order_items"
 

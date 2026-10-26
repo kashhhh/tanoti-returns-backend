@@ -61,6 +61,10 @@ class Config:
     # returns' photos are deleted automatically.
     MAX_PHOTO_STORAGE_MB = int(os.environ.get("MAX_PHOTO_STORAGE_MB", "500"))
     PHOTO_RETENTION_DAYS = int(os.environ.get("PHOTO_RETENTION_DAYS", "120"))
+    VIDEOS_STORAGE_DIR = os.environ.get("VIDEOS_STORAGE_DIR", str(BASE_DIR / "private_videos"))
+    MAX_VIDEO_UPLOAD_MB = int(os.environ.get("MAX_VIDEO_UPLOAD_MB", "200"))
+    MAX_VIDEO_STORAGE_MB = int(os.environ.get("MAX_VIDEO_STORAGE_MB", "20000"))
+    VIDEO_MIN_FREE_MB = int(os.environ.get("VIDEO_MIN_FREE_MB", "1024"))
 
     # Delhivery
     DELHIVERY_API_TOKEN = os.environ.get("DELHIVERY_API_TOKEN")

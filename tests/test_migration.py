@@ -47,6 +47,7 @@ class MigrationTest(unittest.TestCase):
                     self.assertEqual(tuple(units[0]),(1,1,1,2,True))
                     self.assertEqual(tuple(units[1])[1:],(2,1,2,False))
                     self.assertEqual(db.session.execute(text("SELECT order_item_id FROM return_requests WHERE return_number='RET-OLD'")).scalar(),1)
+                    self.assertIn("order_videos", inspect(db.engine).get_table_names())
                     self.assertIn("notifications", inspect(db.engine).get_table_names())
                     self.assertIn("security_rate_limits", inspect(db.engine).get_table_names())
                     for table in ("auth_sessions", "webhook_receipts", "gift_card_issuances", "admin_audit"):
