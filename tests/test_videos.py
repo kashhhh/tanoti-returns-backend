@@ -58,6 +58,17 @@ class VideoTests(unittest.TestCase):
         result = self.client.get(f'/api/admin/videos/orders/{self.order_id}', headers=self.admin_headers).json
         self.assertEqual(len(result['videos']), 4)
         self.assertEqual(len(result['requests']), 2)
+        cards = self.client.get('/api/admin/requests', headers=self.admin_headers).json['requests']
+        self.assertEqual(len(cards), 2)
+        for card in cards:
+            self.assertEqual(card['packing_video_count'], 2)
+            self.assertEqual({v['kind'] for v in card['packing_videos']}, {'packing', 'exchange_packing'})
+            for video in card['packing_videos']:
+                response = self.client.get(video['url'] + '?download=1', headers=self.admin_headers)
+                self.assertEqual(response.status_code, 200)
+                self.assertIn('attachment', response.headers['Content-Disposition'])
+                response.close()
+                self.assertEqual(self.client.get(video['url'] + '?download=1', headers=self.customer_headers).status_code, 401)
         self.assertEqual(self.client.get('/api/admin/videos/orders?q=%23100', headers=self.admin_headers).json['orders'][0]['id'], self.order_id)
         for kind, number in [('exchange_packing', 'RET-VIDEO'), ('return_opening', 'RET-MISSING'), ('packing', 'RET-VIDEO'), ('other', '')]:
             self.assertEqual(self.upload(kind=kind, request_number=number).status_code, 400)
@@ -65,6 +76,10 @@ class VideoTests(unittest.TestCase):
         other = Order(shopify_order_id='200', order_number='200', customer_id=source.customer_id, payment_method=source.payment_method)
         db.session.add(other); db.session.commit()
         self.assertEqual(self.upload(order_id=str(other.id), kind='return_opening', request_number='RET-VIDEO').status_code, 400)
+        orders = self.client.get('/api/admin/videos/orders', headers=self.admin_headers).json['orders']
+        counts = {order['id']: order['packing_video_count'] for order in orders}
+        self.assertEqual(counts[self.order_id], 2)
+        self.assertEqual(counts[other.id], 0)
 
     def test_retry_and_conflict(self):
         upload_id = str(uuid.uuid4())

@@ -106,6 +106,8 @@ def upsert_order(shopify_order: dict, _image_cache: dict = None, *, commit=True,
     order_id = str(shopify_order["id"])
     lock_login("shopify-order:" + order_id)
     order = Order.query.filter_by(shopify_order_id=order_id).with_for_update().first()
+    if order and shopify_order.get("created_at"):
+        order.shopify_created_at = _utc(shopify_order["created_at"])
     incoming_at = _utc(shopify_order["updated_at"]) if shopify_order.get("updated_at") else None
     if order and order.shopify_updated_at and (not incoming_at or incoming_at <= order.shopify_updated_at):
         # Delivery can change without a newer order updated_at. Do not replay
@@ -130,6 +132,8 @@ def upsert_order(shopify_order: dict, _image_cache: dict = None, *, commit=True,
     if not order:
         order = Order(shopify_order_id=str(shopify_order["id"]), customer_id=customer.id)
         db.session.add(order)
+    if shopify_order.get("created_at"):
+        order.shopify_created_at = _utc(shopify_order["created_at"])
     order.shopify_updated_at = incoming_at
 
     order.order_number = str(shopify_order.get("order_number") or shopify_order.get("name", "")).lstrip("#")

@@ -4,7 +4,7 @@ def stage_for(obj, kind):
     if status == "pickup_scheduled":
         if (obj.pickup_status or "").lower() in ("cancelled", "canceled", "closed"):
             return "pickup_cancelled"
-        return "awaiting_parcel" if obj.pickup_tracking_id else "pickup_pending"
+        return "awaiting_parcel" if obj.pickup_tracking_id or obj.pickup_status == "manual_scheduled" else "pickup_pending"
     if status == "completed":
         if kind == "return":
             if obj.net_refund_amount == 0:
@@ -16,7 +16,7 @@ def stage_for(obj, kind):
             return "delivered"
         if (obj.outbound_status or "").lower() in ("returned", "cancelled", "canceled", "closed"):
             return "replacement_cancelled"
-        return "shipment_booked" if obj.outbound_tracking_id else "replacement_pending"
+        return "shipment_booked" if obj.outbound_tracking_id or obj.outbound_status == "manual_scheduled" else "replacement_pending"
     return status
 
 

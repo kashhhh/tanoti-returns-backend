@@ -39,6 +39,19 @@ def serialize(row):
                 url=f"/api/admin/videos/{row.id}/content")
 
 
+
+def packing_videos_by_order(order_ids):
+    grouped = {order_id: [] for order_id in order_ids}
+    if grouped:
+        rows = OrderVideo.query.filter(
+            OrderVideo.order_id.in_(grouped),
+            OrderVideo.kind.in_(("packing", "exchange_packing")),
+        ).order_by(OrderVideo.created_at.desc(), OrderVideo.id.desc()).all()
+        for row in rows:
+            grouped[row.order_id].append(serialize(row))
+    return grouped
+
+
 def order_summary(order):
     return dict(id=order.id, order_number=order.order_number,
                 shopify_order_id=order.shopify_order_id, customer=order.customer.name,
@@ -54,7 +67,8 @@ def orders():
         query = query.filter(or_(Order.order_number == q, Order.order_number == "#" + q,
                                  Order.shopify_order_id == q))
     rows = query.order_by(Order.created_at.desc(), Order.id.desc()).limit(30).all()
-    return jsonify(orders=[order_summary(row) for row in rows])
+    packing = packing_videos_by_order([row.id for row in rows])
+    return jsonify(orders=[{**order_summary(row), "packing_video_count": len(packing[row.id])} for row in rows])
 
 
 @videos_bp.get("/orders/<int:order_id>")

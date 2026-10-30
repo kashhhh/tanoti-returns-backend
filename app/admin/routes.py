@@ -52,9 +52,16 @@ def _repeat_returner_flag(customer_id: int) -> bool:
     return (r_count + e_count) >= 3
 
 
-def _row(obj, kind: str, repeat_flags=None) -> dict:
+def _row(obj, kind: str, repeat_flags=None, packing_videos=None) -> dict:
     from app.services.attention_service import reasons_for
+    from app.admin.videos import packing_videos_by_order
+    order_id = obj.order_item.order_id
+    if packing_videos is None:
+        packing_videos = packing_videos_by_order([order_id])
+    videos = packing_videos.get(order_id, [])
     row = {
+        "packing_video_count": len(videos),
+        "packing_videos": videos,
         "attention_reasons": reasons_for(obj, kind),
         "type": kind,
         "number": obj.return_number if kind == "return" else obj.exchange_number,
@@ -64,6 +71,7 @@ def _row(obj, kind: str, repeat_flags=None) -> dict:
         "size": obj.order_item.size,
         "order_number": obj.order_item.order.order_number,
         "order_id": obj.order_item.order_id,
+        "order_date": obj.order_item.order.shopify_created_at.isoformat() + "Z" if obj.order_item.order.shopify_created_at else None,
         "status": obj.status.value,
         "stage": stage_for(obj, kind),
         "rejected_stage": obj.rejected_stage,
@@ -123,7 +131,9 @@ def list_requests():
         objects, pagination, repeat_flags = list_page(request.args)
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
-    return jsonify({"requests": [_row(obj, kind, repeat_flags) for obj, kind in objects], **pagination})
+    from app.admin.videos import packing_videos_by_order
+    packing = packing_videos_by_order({obj.order_item.order_id for obj, kind in objects})
+    return jsonify({"requests": [_row(obj, kind, repeat_flags, packing) for obj, kind in objects], **pagination})
 
 
 def _find_request(kind: str, number: str):
@@ -140,6 +150,64 @@ def _require_status(req, expected: RequestStatus):
     return None
 
 
+@admin_bp.get("/requests/<kind>/<number>/order-date")
+@admin_required
+def original_order_date(kind, number):
+    req = _find_request(kind, number)
+    if not req:
+        return jsonify(error="Not found"), 404
+    order = req.order_item.order
+    if not order.shopify_created_at:
+        try:
+            from app.services.sync_service import _utc
+            source = shopify_client.fetch_order(order.shopify_order_id)
+            if str(source.get("id")) != order.shopify_order_id or not source.get("created_at"):
+                raise ValueError("Order date unavailable")
+            order.shopify_created_at = _utc(source["created_at"])
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+            return jsonify(error="Original order date unavailable. Try again later."), 503
+    return jsonify(order_date=order.shopify_created_at.isoformat() + "Z")
+
+
+@admin_bp.post("/requests/<kind>/<number>/process-manually")
+@admin_required
+def process_manually(kind, number):
+    from app.utils.audit import record_admin_action
+    import re
+    req = _find_request(kind, number)
+    if not req:
+        return jsonify(error="Not found"), 404
+    data = request.get_json(silent=True) or {}
+    leg = data.get("leg")
+    outbound = leg == "replacement"
+    if leg not in ("pickup", "replacement") or (outbound and kind != "exchange"):
+        return jsonify(error="Choose a pickup or replacement shipment"), 400
+    expected = RequestStatus.COMPLETED if outbound else RequestStatus.PICKUP_SCHEDULED
+    if req.status != expected or (outbound and req.delivered_at):
+        return jsonify(error="This request is not awaiting this shipment"), 409
+    if data.get("confirmed") is not True:
+        return jsonify(error="Confirm that you have arranged this shipment manually"), 400
+    carrier, tracking = data.get("carrier", ""), data.get("tracking_id", "")
+    if (not isinstance(carrier, str) or len(carrier.strip()) > 32
+            or not isinstance(tracking, str) or (tracking and not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", tracking))):
+        return jsonify(error="Enter a valid courier and tracking number, or leave them blank"), 400
+    prefix = "outbound" if outbound else "pickup"
+    if getattr(req, prefix + "_status") == "manual_scheduled":
+        return jsonify(_row(req, kind))
+    shipping_service.prepare_manual_processing(req, kind, leg)
+    req = _find_request(kind, number)
+    setattr(req, prefix + "_carrier", carrier.strip().lower() or "manual")
+    setattr(req, prefix + "_tracking_id", tracking or None)
+    setattr(req, prefix + "_status", "manual_scheduled")
+    record_admin_action("shipment_processed_manually", number + ":" + leg)
+    queue_update(req, kind, "replacement_booked" if outbound else "pickup_booked")
+    db.session.commit()
+    deliver_pending(limit=1)
+    return jsonify(_row(req, kind))
+
+
 @admin_bp.route("/requests/<kind>/<number>/accept-photos", methods=["POST"])
 @admin_required
 def accept_photos(kind, number):
@@ -150,12 +218,15 @@ def accept_photos(kind, number):
     if err:
         return err
 
+    manual = (request.get_json(silent=True) or {}).get("manual_shipping", False)
+    if not isinstance(manual, bool):
+        return jsonify(error="Manual shipping must be true or false"), 400
     req.photo_decision_at = datetime.utcnow()
     # Save approval with the booking fence before any remote call can release the lock.
     req.status = RequestStatus.PICKUP_SCHEDULED
 
     try:
-        carrier, tracking_id, status = shipping_service.schedule_reverse_pickup(
+        carrier, tracking_id, status = ("manual", None, "manual_scheduling_required") if manual else shipping_service.schedule_reverse_pickup(
             order=req.order_item.order, item=req.order_item, request_number=number,
             pickup_address=req.pickup_address
         )
@@ -215,6 +286,9 @@ def accept_parcel(kind, number):
     if err:
         return err
 
+    manual = (request.get_json(silent=True) or {}).get("manual_shipping", False)
+    if not isinstance(manual, bool):
+        return jsonify(error="Manual shipping must be true or false"), 400
     choice = (request.get_json(silent=True) or {}).get("restock", False)
     if not isinstance(choice, bool):
         return jsonify({"error": "Choose whether the inspected item should be restocked"}), 400
@@ -258,7 +332,7 @@ def accept_parcel(kind, number):
     else:  # exchange: ship the replacement item
         req.status = RequestStatus.COMPLETED
         try:
-            carrier, tracking_id, status = shipping_service.schedule_forward_shipment(
+            carrier, tracking_id, status = ("manual", None, "manual_scheduling_required") if manual else shipping_service.schedule_forward_shipment(
                 order=req.order_item.order,
                 item=req.order_item,
                 requested_size=req.requested_size,
@@ -423,9 +497,9 @@ def mark_delivered(number):
     if shipping_service.is_cancelled("replacement", req.outbound_status):
         return jsonify(error="A cancelled shipment cannot be marked delivered. Review it in Delhivery One."), 409
     booking = shipping_service.booking_details(number).get("replacement", {})
-    if booking and (booking.get("state") != "confirmed" or not req.outbound_tracking_id):
+    if booking and booking.get("state") != "manual" and (booking.get("state") != "confirmed" or not req.outbound_tracking_id):
         return jsonify(error="Restore or verify the replacement booking before marking delivery."), 409
-    if booking.get("action_state") in ("pending", "submitted", "uncertain"):
+    if booking.get("state") != "manual" and booking.get("action_state") in ("pending", "submitted", "uncertain"):
         return jsonify(error="Confirm the pending carrier action through tracking before marking delivery."), 409
     # A manual shipment can be confirmed delivered even without an API waybill.
     req.delivered_at = datetime.utcnow()
@@ -517,6 +591,8 @@ def recover_shipment(kind, number):
     if req.status != expected or (outbound and req.delivered_at):
         return jsonify({"error": "This request is not awaiting this shipment"}), 409
     booking = shipping_service.booking_details(number).get(leg)
+    if booking and booking["state"] == "manual":
+        return jsonify(error="This shipment is being processed manually"), 409
     if not booking:
         return jsonify({"error": "No recoverable API attempt exists. Check earlier bookings in Delhivery One."}), 409
     prefix = "outbound" if outbound else "pickup"

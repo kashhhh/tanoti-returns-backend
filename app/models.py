@@ -91,6 +91,7 @@ class Order(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     shopify_order_id = db.Column(db.String(64), unique=True, nullable=False, index=True)
     shopify_updated_at = db.Column(db.DateTime, nullable=True)
+    shopify_created_at = db.Column(db.DateTime, nullable=True)
     order_number = db.Column(db.String(32), nullable=False, index=True)  # what the customer searches by
     customer_id = db.Column(db.Integer, db.ForeignKey("customers.id"), nullable=False)
 

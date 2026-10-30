@@ -27,12 +27,12 @@ def branch(model, kind):
                  if kind == "return" else
                  case((model.delivered_at.isnot(None), "delivered"),
                       (func.lower(model.outbound_status).in_(["returned", "cancelled", "canceled", "closed"]), "replacement_cancelled"),
-                      (func.coalesce(model.outbound_tracking_id, "") != "", "shipment_booked"), else_="replacement_pending"))
+                      (or_(func.coalesce(model.outbound_tracking_id, "") != "", model.outbound_status == "manual_scheduled"), "shipment_booked"), else_="replacement_pending"))
     stage = case(
         (model.status == RequestStatus.PENDING, "pending"),
         (model.status == RequestStatus.PICKUP_SCHEDULED,
          case((func.lower(model.pickup_status).in_(["cancelled", "canceled", "closed"]), "pickup_cancelled"),
-              (func.coalesce(model.pickup_tracking_id, "") != "", "awaiting_parcel"), else_="pickup_pending")),
+              (or_(func.coalesce(model.pickup_tracking_id, "") != "", model.pickup_status == "manual_scheduled"), "awaiting_parcel"), else_="pickup_pending")),
         (model.status == RequestStatus.PARCEL_RECEIVED, "parcel_received"),
         (model.status == RequestStatus.REJECTED, "rejected"),
         else_=completed)

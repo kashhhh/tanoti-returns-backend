@@ -18,6 +18,7 @@ def rules(model, kind, now=None):
                 if kind == "return" else model.delivered_at.isnot(None))
     active = and_(model.status != RequestStatus.REJECTED, ~terminal)
     checks = [
+        ("Previous booking cancellation needs checking", booking(and_(ShippingBooking.state == "manual", ShippingBooking.action_error.isnot(None)))),
         ("Photo review overdue", and_(model.status == RequestStatus.PENDING, model.created_at < now - timedelta(hours=24))),
         ("Pickup overdue — check collection", and_(model.status == RequestStatus.PICKUP_SCHEDULED,
             model.photo_decision_at < now - timedelta(days=3),
@@ -25,10 +26,11 @@ def rules(model, kind, now=None):
         ("Inspection overdue", and_(model.status == RequestStatus.PARCEL_RECEIVED,
             model.parcel_received_at < now - timedelta(days=2))),
         ("Pickup booking missing", and_(model.status == RequestStatus.PICKUP_SCHEDULED,
-            func.coalesce(model.pickup_tracking_id, "") == "")),
+            func.coalesce(model.pickup_tracking_id, "") == "",
+            func.coalesce(model.pickup_status, "") != "manual_scheduled")),
         ("Shipment booking needs review", and_(active, booking(ShippingBooking.state.in_(["not_attempted", "pending", "uncertain"])))),
-        ("Shipment action needs confirmation", and_(active, booking(ShippingBooking.action_state.in_(["pending", "submitted", "uncertain", "rejected"])))),
-        ("Shipment cancelled or returned — arrange next step", and_(active, booking(func.lower(ShippingBooking.carrier_status).in_(["canceled", "cancelled", "closed", "returned"])))),
+        ("Shipment action needs confirmation", and_(active, booking(and_(ShippingBooking.state != "manual", ShippingBooking.action_state.in_(["pending", "submitted", "uncertain", "rejected"]))))),
+        ("Shipment cancelled or returned — arrange next step", and_(active, booking(and_(ShippingBooking.state != "manual", func.lower(ShippingBooking.carrier_status).in_(["canceled", "cancelled", "closed", "returned"]))))),
         ("Tracking update failed", and_(active, booking(ShippingBooking.tracking_error.isnot(None)))),
         ("Email delivery needs attention", exists(select(Notification.id).where(
             Notification.event_key.like(number + ":%"), Notification.sent_at.is_(None),
@@ -43,7 +45,8 @@ def rules(model, kind, now=None):
         ]
     else:
         checks.append(("Replacement booking missing", and_(model.status == RequestStatus.COMPLETED,
-            model.delivered_at.is_(None), func.coalesce(model.outbound_tracking_id, "") == "")))
+            model.delivered_at.is_(None), func.coalesce(model.outbound_tracking_id, "") == "",
+            func.coalesce(model.outbound_status, "") != "manual_scheduled")))
         checks.append(("Replacement delivery overdue", and_(model.status == RequestStatus.COMPLETED,
             model.delivered_at.is_(None), model.parcel_decision_at < now - timedelta(days=7))))
     return checks

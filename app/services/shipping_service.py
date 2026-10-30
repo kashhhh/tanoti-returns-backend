@@ -444,6 +444,38 @@ def cancel_shipment(req, kind, leg):
         raise BookingUncertain(message) from exc
 
 
+def prepare_manual_processing(req, kind, leg):
+    """Try cancelling the old booking, preserving unresolved cancellation evidence."""
+    from flask import g
+    number = req.return_number if kind == "return" else req.exchange_number
+    prefix = "outbound" if leg == "replacement" else "pickup"
+    lock_login("shipping:" + reference_for(number, leg))
+    booking = current_booking(number, leg)
+    if not booking or booking.state == "manual":
+        return
+    reference = booking.reference
+    warning = None
+    if booking.state != "not_attempted" or booking.waybill:
+        try:
+            carrier, waybill, status = check_booking(number, leg)
+            setattr(req, prefix + "_carrier", carrier)
+            setattr(req, prefix + "_tracking_id", waybill)
+            setattr(req, prefix + "_status", status)
+            cancel_shipment(req, kind, leg)
+            booking = db.session.get(ShippingBooking, reference)
+            if not is_cancelled(leg, booking.carrier_status):
+                warning = "Cancellation is not confirmed. Check the previous booking in Delhivery One and cancel it there."
+        except Exception:
+            db.session.rollback()
+            warning = "The previous booking could not be confirmed cancelled. Check and cancel it in Delhivery One."
+    booking = db.session.get(ShippingBooking, reference)
+    booking.state = "manual"
+    booking.action_error = warning
+    booking.action_history = (booking.action_history or []) + [{
+        "action": "manual_processing", "state": "cancellation_unconfirmed" if warning else "confirmed",
+        "by": g.admin_email, "at": datetime.utcnow().isoformat() + "Z"}]
+
+
 def prepare_rebooking(req, kind, leg, expected_reference, stock_ready=False):
     """Fence a new attempt only after authenticated terminal tracking of the old one."""
     from app.utils.audit import record_admin_action
@@ -508,7 +540,7 @@ def refresh_tracking(req, kind):
         if not waybill or getattr(req, prefix + "_carrier") != "delhivery":
             continue
         booking = current_booking(number, leg)
-        if not booking:
+        if not booking or booking.state == "manual":
             continue  # Manually recorded shipments have no API identity to verify.
         try:
             with db.session.begin_nested():
